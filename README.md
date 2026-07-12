@@ -1,5 +1,7 @@
 # Azure SKU Modernization Report
 
+**Current version:** `v0.2`
+
 Generates a fully deterministic Azure VM modernization report (SKU retirements, migration candidates,
 retail cost delta, readiness) including a fact-derived executive dashboard. Output: CSV, JSON
 and a scan-first HTML dashboard in `out/<timestamp>/`.
@@ -37,6 +39,29 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
   traceable live source, the report is not delivery-ready. See
   [Consistency guardians and delivery readiness](#consistency-guardians-and-delivery-readiness).
 
+## Changelog
+
+### v0.2 - 2026-07-12
+
+- Reworked the HTML dashboard into a decision-oriented report with a **Decision Room**, risk-vs-effort
+  matrix, execution scenarios and an "If We Do Nothing" countdown.
+- Moved the CSA / Engineer detail table higher in the report and placed Remediation Plan plus
+  Monitoring Lifecycle near the end of the report flow.
+- Refined remediation wave labels for clearer execution semantics: time-critical, Advisor + sensitive,
+  sensitive validation, architecture and low complexity.
+- Added a closeable **Legend** overlay from the sidebar to explain core concepts, wave meanings,
+  decision sections, detail-table fields, cost caveats and validation expectations.
+- Added inline information icons/tooltips beside key KPIs and report sections.
+- Completed a conservative lint cleanup: ScriptAnalyzer warnings are clean while preserving report
+  facts, calculations, classification rules and output logic.
+
+### v0.1 - Initial baseline
+
+- Deterministic Azure SKU modernization report with CSV, JSON and self-contained HTML output.
+- LIVE-only retirement source model using Azure Advisor Resource Graph and Microsoft Learn markdown.
+- Separate monitoring lifecycle tracking for Dependency Agent / VM Insights Map signals.
+- Deterministic remediation wave plan and delivery-readiness consistency gates.
+
 ## Prerequisites
 
 - PowerShell 7+
@@ -68,17 +93,26 @@ Main sections:
   Advisor-confirmed, SKU-family exposure and retail delta/month.
 - **Info strip:** nearest retirement deadline, SKU-change-vs-generation-change split, and RI/Savings
   Plan impact flag.
+- **Report guide overlay:** **Legend** control below the sidebar as-of date that opens a closeable on-top guide explaining
+  core concepts, wave meanings, decision sections, detail-table fields, cost caveats and validation.
+- **Decision Room (90-day playbook):** a decision-oriented band with three priority lanes
+  (act now, plan with validation, quick wins) built from deterministic wave counts.
+- **Risk vs Effort Matrix:** 2x2 view mapping wave populations to execution lanes
+  (immediate, governed, engineering validation, quick wins).
+- **Execution Scenarios:** conservative, balanced and accelerated rollout views that reorder
+  priorities without changing underlying facts.
+- **If We Do Nothing:** dated retirement countdown list for escalation and planning.
+- **CSA / Engineer detail table:** per-VM rows with source, OS pricing basis, recommendation, validation,
+  next step and coloured wave badge.
+- **Summary by change type:** same-generation resize vs Gen1->Gen2 counts, read from the existing
+  fact split.
+- **Cost impact (monthly):** shows net retail delta. If future fact fields provide total increase and
+  total decrease, the dashboard will show those too; otherwise it deliberately omits that split.
 - **Remediation Plan (waves):** W0-W4 horizontal timeline cards and detailed wave panels. The same
   semantic wave colours are reused in timeline cards and per-row badges: W0 red, W1 orange, W2 amber,
   W3 blue, W4 green. Each state also carries a text label, so the report does not rely on colour alone.
 - **Monitoring Lifecycle panel:** visually detached from compute retirement and labelled as outside the
   compute retirement count. Dependency Agent / VM Insights Map rows are tracked here only.
-- **Summary by change type:** same-generation resize vs Gen1->Gen2 counts, read from the existing
-  fact split.
-- **Cost impact (monthly):** shows net retail delta. If future fact fields provide total increase and
-  total decrease, the dashboard will show those too; otherwise it deliberately omits that split.
-- **CSA / Engineer detail table:** per-VM rows with source, OS pricing basis, recommendation, validation,
-  next step and coloured wave badge.
 - **Analysis Coverage and Provenance/Disclaimer footer.**
 
 Print/PDF output uses a dedicated `@media print` stylesheet that expands details sections and lays the
@@ -120,11 +154,11 @@ first rule that matches wins, so a VM is never double-counted:
 
 | Wave | Rule (first match wins) |
 |---|---|
-| **0 — Urgent (deadline < 24 months)** | `RetirementRiskLevel` is `Critical` or `High` |
-| **1 — Advisor-confirmed & sensitive** | source gate `LiveAdvisorArg` **and** `SensitiveWorkload` |
-| **2 — Sensitive, same generation** | `SensitiveWorkload` **and not** `GenerationChange` |
+| **0 — Urgent retirement deadline** | `RetirementRiskLevel` is `Critical` or `High` |
+| **1 — Advisor-confirmed sensitive workloads** | source gate `LiveAdvisorArg` **and** `SensitiveWorkload` |
+| **2 — Sensitive workload, same-generation resize** | `SensitiveWorkload` **and not** `GenerationChange` |
 | **3 — Cross-family Gen1→Gen2** | `GenerationChange` **and** the target changes VM family |
-| **4 — Simple same-generation resize** | everything else |
+| **4 — Low-complexity same-generation resize** | everything else |
 
 Order matters and resolves the ambiguous rows without double counting: an Advisor-confirmed sensitive
 Domain Controller that also changes generation lands in **Wave 1** (not Wave 3), and a `High`-risk row

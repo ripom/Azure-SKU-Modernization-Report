@@ -1,3 +1,9 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Write-Log is a local script helper; keeping the established name avoids broad call-site churn.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'This is an interactive report generator and intentionally emits concise progress/status text to the console.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Some parameters are retained for CLI/backward compatibility or future source compatibility.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseBOMForUnicodeEncodedFile', '', Justification = 'Repository uses UTF-8 without BOM; HTML text contains non-ASCII entities and symbols intentionally.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'State-changing helpers operate on report output/cache paths and are not exposed as user-facing cmdlets.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper names reflect domain collections such as prices, recommendations, facts, and retirements.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
@@ -153,7 +159,7 @@ function Write-Log {
             Add-Content -LiteralPath $script:RunLogPath -Value $line -Encoding UTF8
         }
         catch {
-            # Keep logging to console even if file append fails.
+            Write-Verbose "Run log append failed; continuing with console logging. $($_.Exception.Message)"
         }
     }
 }
@@ -296,7 +302,7 @@ function Save-RunStats {
             }
         }
         catch {
-            # ignore and keep current value
+            Write-Verbose "Existing run_stats.json could not be read; keeping current page count. $($_.Exception.Message)"
         }
     }
 
@@ -308,7 +314,7 @@ function Save-RunStats {
     $obj | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsPath -Encoding UTF8
 }
 
-function Ensure-Module {
+function Assert-ModuleInstalled {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     if (-not (Get-Module -ListAvailable -Name $Name)) {
@@ -318,7 +324,7 @@ function Ensure-Module {
     Import-Module $Name -ErrorAction Stop | Out-Null
 }
 
-function Ensure-Directory {
+function New-DirectoryIfMissing {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -419,7 +425,7 @@ function ConvertTo-NormalizedCatalogEntries {
 
         $locations = @()
         if ($c.PSObject.Properties.Match("Locations").Count -gt 0 -and $c.Locations) {
-            $locations = @($c.Locations | ForEach-Object { Normalize-Location ([string]$_) } | Where-Object { $_ })
+            $locations = @($c.Locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ })
         }
 
         $normalized.Add([pscustomobject]@{
@@ -473,7 +479,7 @@ function Convert-CacheEntriesToPriceMap {
         if (-not $e) { continue }
 
         $sku = if ($e.PSObject.Properties.Match("ArmSkuName").Count -gt 0) { [string]$e.ArmSkuName } else { "" }
-        $region = if ($e.PSObject.Properties.Match("Region").Count -gt 0) { Normalize-Location ([string]$e.Region) } else { "" }
+        $region = if ($e.PSObject.Properties.Match("Region").Count -gt 0) { ConvertTo-NormalizedLocation ([string]$e.Region) } else { "" }
         if (-not $sku -or -not $region) { continue }
 
         $key = if ($e.PSObject.Properties.Match("Key").Count -gt 0 -and $e.Key) { [string]$e.Key } else { "{0}|{1}" -f $sku, $region }
@@ -526,7 +532,7 @@ function Convert-CacheEntriesToCommitmentMap {
         if (-not $e) { continue }
 
         $sku = if ($e.PSObject.Properties.Match("ArmSkuName").Count -gt 0) { [string]$e.ArmSkuName } else { "" }
-        $region = if ($e.PSObject.Properties.Match("Region").Count -gt 0) { Normalize-Location ([string]$e.Region) } else { "" }
+        $region = if ($e.PSObject.Properties.Match("Region").Count -gt 0) { ConvertTo-NormalizedLocation ([string]$e.Region) } else { "" }
         if (-not $sku -or -not $region) { continue }
 
         $key = if ($e.PSObject.Properties.Match("Key").Count -gt 0 -and $e.Key) { [string]$e.Key } else { "{0}|{1}" -f $sku, $region }
@@ -574,7 +580,7 @@ function Get-HttpStatusCodeFromError {
         }
     }
     catch {
-        # ignore
+        Write-Verbose "HTTP status code could not be extracted from error record. $($_.Exception.Message)"
     }
 
     return 0
@@ -706,7 +712,7 @@ function Get-ComputeSkuCatalogCached {
         scope                 = "compute-sku"
         tenantId              = if ($TenantId) { $TenantId } else { "N/A" }
         subscriptionIdForRest = if ($SubscriptionIdForRest) { $SubscriptionIdForRest } else { "N/A" }
-        regions               = @($RegionsFilter | ForEach-Object { Normalize-Location ([string]$_) } | Sort-Object -Unique)
+        regions               = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Sort-Object -Unique)
         useRestApi            = $UseRestApi
         apiVersion            = $ApiVersion
         includeExtended       = $IncludeExtendedLocations
@@ -766,7 +772,7 @@ function Get-RetailPricesForVirtualMachinesCached {
         scope    = "retail-vm-prices"
         tenantId = if ($TenantId) { $TenantId } else { "N/A" }
         currency = if ($Currency) { $Currency } else { "USD" }
-        regions  = @($RegionsFilter | ForEach-Object { Normalize-Location ([string]$_) } | Sort-Object -Unique)
+        regions  = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Sort-Object -Unique)
     }
     # Adaptive validity floor: NextPageLink guarantees a complete per-region download, so a fresh download
     # is trusted on its own COMPLETENESS flag (below), not on a fixed key count. For deciding whether a
@@ -795,7 +801,7 @@ function Get-RetailPricesForVirtualMachinesCached {
         # Compatible-cache reuse: a cache whose region set is a SUPERSET of the requested regions (same
         # tenant + currency) can serve this run - we just filter its map down to the requested regions.
         # This lets a uksouth+italynorth cache satisfy a uksouth-only run without re-downloading.
-        $requestedSet = @($context.regions | ForEach-Object { Normalize-Location ([string]$_) } | Sort-Object -Unique)
+        $requestedSet = @($context.regions | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Sort-Object -Unique)
         $compatibleCaches = New-Object 'System.Collections.Generic.List[object]'
         foreach ($candidateCache in @(Get-ChildItem -LiteralPath $CacheDir -Filter 'retail_vm_prices_*.json' -File -ErrorAction SilentlyContinue)) {
             if ($candidateCache.FullName -eq (Resolve-Path -LiteralPath $cachePath -ErrorAction SilentlyContinue)) { continue }
@@ -805,7 +811,7 @@ function Get-RetailPricesForVirtualMachinesCached {
             if ([string]$candidateEnvelope.Context.tenantId -ne [string]$context.tenantId) { continue }
             $candidateCurrency = if ($candidateEnvelope.Context.PSObject.Properties.Match('currency').Count -gt 0) { [string]$candidateEnvelope.Context.currency } else { '' }
             if ($candidateCurrency -ne [string]$context.currency) { continue }
-            $candidateRegions = @($candidateEnvelope.Context.regions | ForEach-Object { Normalize-Location ([string]$_) } | Sort-Object -Unique)
+            $candidateRegions = @($candidateEnvelope.Context.regions | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Sort-Object -Unique)
             if ($requestedSet.Count -eq 0) { continue }
             $missingFromCandidate = @($requestedSet | Where-Object { $_ -notin $candidateRegions })
             if ($missingFromCandidate.Count -gt 0) { continue }
@@ -892,7 +898,7 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
 
     $normalizedRegions = @()
     if ($RegionsFilter -and $RegionsFilter.Count -gt 0) {
-        $normalizedRegions = @($RegionsFilter | ForEach-Object { Normalize-Location ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
+        $normalizedRegions = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
     }
 
     $kinds = @(
@@ -995,7 +1001,7 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
             if (-not $item.armRegionName) { continue }
 
             $skuName = [string]$item.armSkuName
-            $region = Normalize-Location ([string]$item.armRegionName)
+            $region = ConvertTo-NormalizedLocation ([string]$item.armRegionName)
             if ($normalizedRegions.Count -gt 0 -and $region -notin $normalizedRegions) { continue }
 
             $key = "{0}|{1}" -f $skuName, $region
@@ -1047,7 +1053,7 @@ function Get-RetailCommitmentSignalsForVirtualMachinesCached {
         scope    = "retail-vm-commitment-signals"
         tenantId = if ($TenantId) { $TenantId } else { "N/A" }
         currency = if ($Currency) { $Currency } else { "USD" }
-        regions  = @($RegionsFilter | ForEach-Object { Normalize-Location ([string]$_) } | Sort-Object -Unique)
+        regions  = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Sort-Object -Unique)
     }
     $cachePath = New-CacheFilePath -CacheDir $CacheDir -Prefix "retail_vm_commitments" -Context $context
 
@@ -1153,13 +1159,13 @@ function Resolve-TargetSubscriptionIds {
     return @($enabledSubs | Select-Object -ExpandProperty Id -Unique)
 }
 
-function Normalize-Location {
+function ConvertTo-NormalizedLocation {
     param([Parameter(Mandatory = $true)][string]$Location)
 
     return $Location.Trim().ToLowerInvariant().Replace(" ", "")
 }
 
-function Normalize-SkuName {
+function ConvertTo-NormalizedSkuName {
     param([Parameter(Mandatory = $true)][string]$SkuName)
 
     return $SkuName.Trim().ToLowerInvariant()
@@ -1267,9 +1273,9 @@ function Get-ComputeSkuCatalogFromRest {
         $pct = if ($totalSkus -gt 0) { [int][math]::Round(($idx / $totalSkus) * 100, 0) } else { 100 }
         Write-Progress -Id 12 -ParentId 1 -Activity "Compute SKU catalog (REST)" -Status "Analyzing SKU $idx/$totalSkus" -PercentComplete $pct
 
-        $locations = @($sku.locations | ForEach-Object { Normalize-Location ([string]$_) })
+        $locations = @($sku.locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) })
         if ($RegionsFilter -and $RegionsFilter.Count -gt 0) {
-            $normalizedRegions = $RegionsFilter | ForEach-Object { Normalize-Location $_ }
+            $normalizedRegions = $RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation $_ }
             if (-not ($locations | Where-Object { $_ -in $normalizedRegions })) {
                 continue
             }
@@ -1397,7 +1403,7 @@ Resources
                 SubscriptionId = [string]$r.subscriptionId
                 ResourceGroup  = [string]$r.resourceGroup
                 VmName         = [string]$r.name
-                Location       = Normalize-Location ([string]$r.location)
+                Location       = ConvertTo-NormalizedLocation ([string]$r.location)
                 VmSize         = [string]$r.vmSize
                 OsType         = [string]$r.osType
                 VmCreatedDate  = Format-NullableDate ([string]$r.vmCreatedDate)
@@ -1463,9 +1469,9 @@ function Get-ComputeSkuCatalog {
         $pct = if ($totalSkus -gt 0) { [int][math]::Round(($idx / $totalSkus) * 100, 0) } else { 100 }
         Write-Progress -Id 12 -ParentId 1 -Activity "Compute SKU catalog" -Status "Analyzing SKU $idx/$totalSkus" -PercentComplete $pct
 
-        $locations = @($sku.Locations | ForEach-Object { Normalize-Location ([string]$_) })
+        $locations = @($sku.Locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) })
         if ($RegionsFilter -and $RegionsFilter.Count -gt 0) {
-            $normalizedRegions = $RegionsFilter | ForEach-Object { Normalize-Location $_ }
+            $normalizedRegions = $RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation $_ }
             if (-not ($locations | Where-Object { $_ -in $normalizedRegions })) {
                 continue
             }
@@ -1515,7 +1521,7 @@ function Get-RetailPricesForVirtualMachines {
     # officially supported cursor and returns every page for the requested (region-scoped) filter.
     $normalizedRegions = @()
     if ($RegionsFilter -and $RegionsFilter.Count -gt 0) {
-        $normalizedRegions = @($RegionsFilter | ForEach-Object { Normalize-Location ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
+        $normalizedRegions = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
     }
 
     $filterTargets = New-Object 'System.Collections.Generic.List[object]'
@@ -1624,7 +1630,7 @@ function Get-RetailPricesForVirtualMachines {
             if (-not $item.armRegionName) { continue }
             if (Test-IsExcludedRetailVmPriceRecord -Item $item) { continue }
 
-            $region = Normalize-Location ([string]$item.armRegionName)
+            $region = ConvertTo-NormalizedLocation ([string]$item.armRegionName)
             if ($normalizedRegions.Count -gt 0 -and $region -notin $normalizedRegions) { continue }
 
             $results.Add([pscustomobject]@{
@@ -1906,7 +1912,7 @@ function Convert-SkuToSeriesKey {
     #>
     param([Parameter(Mandatory = $true)][string]$SkuName)
     
-    $normalized = Normalize-SkuName $SkuName
+    $normalized = ConvertTo-NormalizedSkuName $SkuName
     
     # Mapping table: normalized SKU pattern → Learn series key
     $mapping = @{
@@ -1956,8 +1962,6 @@ function Resolve-OfficialRetirementLiveOnly {
         [Parameter(Mandatory = $false)][hashtable]$LiveAdvisorArgByResourceId = @{},
         [Parameter(Mandatory = $false)][object[]]$LiveLearnSeries = @()
     )
-    
-    $normalizedSku = Normalize-SkuName $SkuName
     
     # Priority 1: Check live Advisor ARG (per-resource, Stream A)
     # (This is checked per-VM-resource by caller, not here)
@@ -2160,7 +2164,7 @@ AdvisorResources
     }
 }
 
-function Load-Retirements {
+function Get-Retirements {
     <#
     .SYNOPSIS
     Load retirement data from LIVE sources only (no fallback).
@@ -2330,7 +2334,7 @@ function Resolve-RetirementForSku {
 
     if (-not $Retirements) { return $null }
 
-    $normalizedSku = Normalize-SkuName $SkuName
+    $normalizedSku = ConvertTo-NormalizedSkuName $SkuName
     if ($Retirements.PSObject.Properties.Match("Exact").Count -gt 0 -and $Retirements.Exact) {
         if ($Retirements.Exact.ContainsKey($normalizedSku)) {
             return $Retirements.Exact[$normalizedSku]
@@ -2396,7 +2400,7 @@ function Save-Snapshot {
         [Parameter(Mandatory = $false)][hashtable]$PriceMap
     )
 
-    Ensure-Directory -Path $SnapshotDir
+    New-DirectoryIfMissing -Path $SnapshotDir
     $snapshotDate = Get-Date -Format "yyyy-MM-dd"
     $snapshotPath = Join-Path $SnapshotDir ("sku_snapshot_{0}.json" -f $snapshotDate)
 
@@ -2451,7 +2455,7 @@ function Get-FirstSeenDates {
 
         foreach ($row in $data) {
             if (-not $row.VmSize -or -not $row.Region -or -not $row.Date) { continue }
-            $k = "{0}|{1}" -f [string]$row.VmSize, (Normalize-Location ([string]$row.Region))
+            $k = "{0}|{1}" -f [string]$row.VmSize, (ConvertTo-NormalizedLocation ([string]$row.Region))
             $d = Get-Date ([string]$row.Date)
 
             if (-not $firstSeen.ContainsKey($k) -or $d -lt $firstSeen[$k]) {
@@ -2523,7 +2527,7 @@ function Get-CapString {
 function Get-SkuShapeKey {
     param([Parameter(Mandatory = $true)][string]$SkuName)
 
-    $n = Normalize-SkuName $SkuName
+    $n = ConvertTo-NormalizedSkuName $SkuName
     $m = [regex]::Match($n, "^standard_(?<series>[a-z]+)(?<size>\d+)[a-z]*(?:_v\d+)?$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
         return ("{0}{1}" -f $m.Groups["series"].Value.ToLowerInvariant(), $m.Groups["size"].Value)
@@ -2720,7 +2724,7 @@ function Get-CommitmentSupportForSkuRegion {
         }
     }
 
-    $key = "{0}|{1}" -f [string]$SkuName, (Normalize-Location ([string]$Region))
+    $key = "{0}|{1}" -f [string]$SkuName, (ConvertTo-NormalizedLocation ([string]$Region))
     if ($CommitmentMap.ContainsKey($key)) {
         return $CommitmentMap[$key]
     }
@@ -2821,7 +2825,7 @@ function Get-RetirementEvidence {
 function Test-IsBurstableSku {
     param([Parameter(Mandatory = $true)][string]$SkuName)
 
-    $n = (Normalize-SkuName $SkuName)
+    $n = (ConvertTo-NormalizedSkuName $SkuName)
     # Standard_B... family (burstable). Matches B1s, B2ms, B4ms, B2s_v2, B4as_v2, Bpsv2, etc.
     return ($n -match '^standard_b[0-9]')
 }
@@ -2836,8 +2840,6 @@ function Get-WorkloadRole {
     $n = $VmName.ToLowerInvariant()
     $tags = ([string]$TagsText).ToLowerInvariant()
     $ext = ([string]$ExtensionsText).ToLowerInvariant()
-    $combined = "$n `n$tags `n$ext"
-
     # Signals from installed extensions (strong indicators of workload type).
     if ($ext -match "microsoft\.azureadconnect|aadconnecthealth|adsync") {
         return [pscustomobject]@{ Role = "Identity-DirectorySync"; Conservative = $true; Source = "extension" }
@@ -3936,7 +3938,7 @@ function Confirm-MonitoringAgentPresence {
     return $rows
 }
 
-function Normalize-MonitoringLifecycleRows {
+function ConvertTo-NormalizedMonitoringLifecycleRows {
     param([Parameter(Mandatory = $false)][object[]]$MonitoringRows = @())
 
     $rows = @($MonitoringRows | Where-Object { $_ })
@@ -3976,7 +3978,7 @@ function Normalize-MonitoringLifecycleRows {
     return @($normalized.ToArray() | Sort-Object ResourceId)
 }
 
-function Render-MonitoringLifecycleTrack {
+function ConvertTo-MonitoringLifecycleTrackHtml {
     <#
     .SYNOPSIS
     Renders the monitoring-lifecycle track (Dependency Agent / VM Insights Map EOL) as a SEPARATE
@@ -3984,7 +3986,7 @@ function Render-MonitoringLifecycleTrack {
     #>
     param([Parameter(Mandatory = $false)][object[]]$MonitoringRows = @())
 
-    $rows = @(Normalize-MonitoringLifecycleRows -MonitoringRows $MonitoringRows)
+    $rows = @(ConvertTo-NormalizedMonitoringLifecycleRows -MonitoringRows $MonitoringRows)
     if ($rows.Count -eq 0) { return "" }
 
     $confirmed = @($rows | Where-Object { $_.AgentPresence -eq 'Confirmed' } | Select-Object -ExpandProperty ResourceId -Unique).Count
@@ -4115,7 +4117,7 @@ function Build-ReportFacts {
     )
 
     $factRows = New-Object 'System.Collections.Generic.List[object]'
-    $monitoringRows = @(Normalize-MonitoringLifecycleRows -MonitoringRows $MonitoringLifecycle)
+    $monitoringRows = @(ConvertTo-NormalizedMonitoringLifecycleRows -MonitoringRows $MonitoringLifecycle)
 
     foreach ($row in @($Rows)) {
         $evidenceSource = if ($row.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$row.EvidenceSource } else { '' }
@@ -4686,11 +4688,11 @@ function Build-RemediationPlan {
     .DESCRIPTION
     First-match wave rules (evaluated top to bottom; the first that matches wins, so a row is never
     double-counted):
-      Wave 0 - Urgent (deadline < 24 months) : RetirementRiskLevel is Critical or High.
-      Wave 1 - Advisor-confirmed & sensitive : gate = LiveAdvisorArg AND SensitiveWorkload.
-      Wave 2 - Sensitive, same-generation    : SensitiveWorkload AND NOT GenerationChange.
-      Wave 3 - Cross-family Gen1->Gen2        : GenerationChange AND cross-family.
-      Wave 4 - Simple same-generation resize  : everything else.
+    Wave 0 - Urgent retirement deadline      : RetirementRiskLevel is Critical or High.
+    Wave 1 - Advisor-confirmed sensitive workloads : gate = LiveAdvisorArg AND SensitiveWorkload.
+    Wave 2 - Sensitive workload, same-generation resize : SensitiveWorkload AND NOT GenerationChange.
+    Wave 3 - Cross-family Gen1->Gen2        : GenerationChange AND cross-family.
+    Wave 4 - Low-complexity same-generation resize : everything else.
     Order resolves the tricky rows without double counting: an Advisor-confirmed sensitive DC lands in
     Wave 1 (not Wave 3 even if it changes generation), and a High-risk row lands in Wave 0 (not Wave 3
     even if it is cross-family/gen-change). Operates only on retirement-path rows, so the wave counts
@@ -4708,11 +4710,11 @@ function Build-RemediationPlan {
     }
 
     $waveMeta = @(
-        [pscustomobject]@{ Number = 0; Title = 'Wave 0 - Urgent (deadline < 24 months)'; Note = 'Nearest retirement deadlines; schedule first.' }
-        [pscustomobject]@{ Number = 1; Title = 'Wave 1 - Advisor-confirmed & sensitive'; Note = 'Per-resource Advisor signals on delicate workloads.' }
-        [pscustomobject]@{ Number = 2; Title = 'Wave 2 - Sensitive workload, simple resize (same generation)'; Note = 'Same-generation resize on sensitive workloads; low technical risk.' }
+        [pscustomobject]@{ Number = 0; Title = 'Wave 0 - Urgent retirement deadline'; Note = 'Time-critical retirement path; schedule first.' }
+        [pscustomobject]@{ Number = 1; Title = 'Wave 1 - Advisor-confirmed sensitive workloads'; Note = 'Per-resource Advisor signals on delicate workloads.' }
+        [pscustomobject]@{ Number = 2; Title = 'Wave 2 - Sensitive workload, same-generation resize'; Note = 'Lower technical change, but validation is still required for sensitive workloads.' }
         [pscustomobject]@{ Number = 3; Title = 'Wave 3 - Cross-family Gen1->Gen2 (needs architecture validation)'; Note = 'Highest validation effort: class change plus generation boundary.' }
-        [pscustomobject]@{ Number = 4; Title = 'Wave 4 - Simple same-generation resize'; Note = 'Low-risk quick wins, often cost-negative.' }
+        [pscustomobject]@{ Number = 4; Title = 'Wave 4 - Low-complexity same-generation resize'; Note = 'Low-complexity quick wins, often cost-negative.' }
     )
     $byWave = @{}; foreach ($w in $waveMeta) { $byWave[$w.Number] = New-Object 'System.Collections.Generic.List[object]' }
 
@@ -4906,11 +4908,11 @@ function ConvertTo-SimplifiedReportHtml {
 
     function Get-WaveUrgency([object]$Number) {
         switch ([int]$Number) {
-            0 { return 'Critical' }
-            1 { return 'High' }
-            2 { return 'Medium' }
-            3 { return 'Architecture validation' }
-            default { return 'Low' }
+            0 { return 'Time-critical' }
+            1 { return 'Advisor + sensitive' }
+            2 { return 'Sensitive validation' }
+            3 { return 'Architecture' }
+            default { return 'Low complexity' }
         }
     }
 
@@ -4967,6 +4969,55 @@ function ConvertTo-SimplifiedReportHtml {
             [void]$waveBuilder.Append("</article>")
         }
         [void]$waveBuilder.Append("</details>")
+    }
+
+    $waveCountByNumber = @{}
+    foreach ($wave in @($RemediationPlan.Waves)) {
+        $waveCountByNumber[[int]$wave.Number] = @($wave.Items).Count
+    }
+    $w0Count = if ($waveCountByNumber.ContainsKey(0)) { [int]$waveCountByNumber[0] } else { 0 }
+    $w1Count = if ($waveCountByNumber.ContainsKey(1)) { [int]$waveCountByNumber[1] } else { 0 }
+    $w2Count = if ($waveCountByNumber.ContainsKey(2)) { [int]$waveCountByNumber[2] } else { 0 }
+    $w3Count = if ($waveCountByNumber.ContainsKey(3)) { [int]$waveCountByNumber[3] } else { 0 }
+    $w4Count = if ($waveCountByNumber.ContainsKey(4)) { [int]$waveCountByNumber[4] } else { 0 }
+
+    $actNowCount = $w0Count + $w1Count
+    $planNowCount = $w2Count + $w3Count
+    $quickWinCount = $w4Count
+    $advisorConfidencePercent = if ([int]$Facts.RetireCount -gt 0) {
+        [int][math]::Round(([double]$Facts.AdvisorConfirmed / [double]$Facts.RetireCount) * 100.0, 0)
+    }
+    else { 0 }
+
+    $topDeadlines = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($factRow in @($Facts.Rows)) {
+        if ($factRow.PSObject.Properties.Match('RetirementDate').Count -eq 0) { continue }
+        $dateText = [string]$factRow.RetirementDate
+        if ([string]::IsNullOrWhiteSpace($dateText) -or $dateText -eq 'N/A') { continue }
+        $parsed = [datetime]::MinValue
+        if (-not [datetime]::TryParse($dateText, [ref]$parsed)) { continue }
+        $vmName = if ($factRow.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$factRow.VmName } else { 'N/A' }
+        $nextStep = if ($factRow.PSObject.Properties.Match('NextStep').Count -gt 0) { [string]$factRow.NextStep } else { '' }
+        $topDeadlines.Add([pscustomobject]@{
+                Date    = $parsed
+                DateText = $dateText
+                VmName  = $vmName
+                NextStep = $nextStep
+            }) | Out-Null
+    }
+
+    $countdownBuilder = New-Object 'System.Text.StringBuilder'
+    $topDeadlineRows = @($topDeadlines | Sort-Object -Property Date | Select-Object -First 4)
+    if ($topDeadlineRows.Count -gt 0) {
+        [void]$countdownBuilder.Append("<ol class='countdown-list'>")
+        foreach ($d in $topDeadlineRows) {
+            $subtitle = if (-not [string]::IsNullOrWhiteSpace([string]$d.NextStep)) { [string]$d.NextStep } else { 'Validate migration sequence and execution window.' }
+            [void]$countdownBuilder.Append("<li><span class='deadline-date'>$(ConvertTo-HtmlText $d.DateText)</span><strong>$(ConvertTo-HtmlText $d.VmName)</strong><span>$(ConvertTo-HtmlText $subtitle)</span></li>")
+        }
+        [void]$countdownBuilder.Append("</ol>")
+    }
+    else {
+        [void]$countdownBuilder.Append("<p class='meta'>No dated retirement rows available in this scope.</p>")
     }
 
     $monitoringTableHtml = ''
@@ -5088,6 +5139,61 @@ ul { margin-top: 8px; }
 .info-card { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 12px; }
 .info-label { color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .info-value { font-size: 16px; font-weight: 800; margin-top: 5px; color: #0f172a; }
+.story-band { border: 1px solid #dbe4ff; border-radius: 14px; background: linear-gradient(135deg, #eef4ff 0%, #f8fafc 65%, #fff1f2 100%); padding: 18px; margin: 10px 0 16px; }
+.story-kicker { font-size: 11px; font-weight: 900; letter-spacing: .09em; text-transform: uppercase; color: #334155; }
+.story-title { font-size: 24px; line-height: 1.15; margin: 6px 0 8px; color: #0f172a; }
+.story-subtitle { color: #334155; font-size: 14px; margin-bottom: 10px; }
+.story-status { display: inline-flex; border: 1px solid #bfdbfe; border-radius: 999px; padding: 5px 10px; background: #eff6ff; color: #1e3a8a; font-weight: 800; font-size: 12px; }
+.decision-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.decision-card { border-radius: 12px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
+.decision-tag { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
+.decision-value { font-size: 28px; font-weight: 900; margin-top: 5px; color: #0f172a; }
+.decision-title { font-size: 14px; font-weight: 800; color: #1e293b; margin-top: 4px; }
+.decision-note { font-size: 12px; color: #334155; margin-top: 6px; }
+.matrix-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.matrix-cell { border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
+.matrix-axis { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; color: #64748b; }
+.matrix-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 5px; }
+.matrix-title { font-size: 14px; font-weight: 800; color: #0f172a; }
+.matrix-count { font-size: 20px; font-weight: 900; }
+.matrix-note { color: #334155; font-size: 12px; margin-top: 7px; }
+.cell-high-low { border-left: 5px solid #dc2626; }
+.cell-high-high { border-left: 5px solid #ea580c; }
+.cell-low-high { border-left: 5px solid #2563eb; }
+.cell-low-low { border-left: 5px solid #16a34a; }
+.scenario-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.scenario-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #ffffff; }
+.scenario-card h3 { margin: 0; font-size: 14px; }
+.scenario-count { font-size: 22px; font-weight: 900; margin-top: 6px; color: #0f172a; }
+.scenario-card p { margin-top: 6px; font-size: 12px; color: #334155; }
+.countdown-list { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 8px; }
+.countdown-list li { display: grid; gap: 3px; }
+.deadline-date { display: inline-block; width: fit-content; border-radius: 999px; padding: 2px 8px; background: #fee2e2; color: #991b1b; font-size: 11px; font-weight: 800; }
+.confidence-line { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.confidence-chip { border-radius: 999px; border: 1px solid #cbd5e1; padding: 3px 8px; font-size: 11px; font-weight: 800; color: #334155; background: #ffffff; }
+.legend-body { padding: 14px; display: grid; gap: 12px; }
+.legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.legend-box { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #ffffff; }
+.legend-box h3 { margin: 0 0 7px; font-size: 13px; color: #0f172a; }
+.legend-box dl { margin: 0; display: grid; gap: 7px; }
+.legend-box dt { font-weight: 900; font-size: 12px; color: #1e293b; }
+.legend-box dd { margin: 2px 0 0; color: #475569; font-size: 12px; line-height: 1.35; }
+.legend-inline { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend-inline span { border-radius: 999px; border: 1px solid #cbd5e1; padding: 3px 8px; font-size: 11px; font-weight: 800; background: #f8fafc; color: #334155; }
+.info-dot { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; margin-left: 6px; border-radius: 999px; border: 1px solid #93c5fd; background: #eff6ff; color: #1d4ed8; font-size: 11px; font-weight: 900; vertical-align: middle; cursor: help; }
+.info-dot:hover { background: #dbeafe; border-color: #60a5fa; }
+.help-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.help-tab { width: fit-content; margin-top: 14px; border-radius: 999px; background: #1d4ed8; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 12px; font-size: 12px; font-weight: 900; letter-spacing: .02em; box-shadow: 0 10px 20px rgba(15,23,42,0.22); cursor: pointer; border: 2px solid rgba(255,255,255,0.82); }
+.help-tab:before { content: 'i'; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 11px; font-weight: 900; }
+.help-tab:hover { background: #1e40af; }
+.help-overlay { display: none; position: fixed; inset: 0; z-index: 120; background: rgba(15,23,42,0.52); padding: 34px; overflow: auto; }
+.help-toggle:checked ~ .help-overlay { display: block; }
+.help-layer { max-width: 1040px; margin: 0 auto; background: #ffffff; border-radius: 14px; border: 1px solid #dbe4ff; box-shadow: 0 24px 60px rgba(15,23,42,0.28); overflow: hidden; }
+.help-layer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+.help-layer-head h2 { margin: 0; }
+.help-close { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; border-radius: 999px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; cursor: pointer; font-weight: 900; }
+.help-close:hover { background: #eff6ff; border-color: #93c5fd; }
+.help-layer-body { padding: 16px; }
 .content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; margin-top: 18px; }
 .panel { border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; padding: 16px; box-shadow: 0 1px 0 rgba(15,23,42,0.04); }
 .monitoring-panel { border-left: 6px solid #475569; background: #f8fafc; }
@@ -5121,12 +5227,62 @@ ul { margin-top: 8px; }
 .money-value { font-weight: 900; margin-top: 4px; }
 .table-wrap { overflow-x: auto; }
 .monitor-table { margin-top: 10px; }
-@media print { body { background: #ffffff; } .layout { display: block; } .sidebar { position: static; width: auto; color: #0f172a; background: #ffffff; border-bottom: 1px solid #cbd5e1; } .sidebar .side-muted, .sidebar .side-item span { color: #334155; } .sidebar .side-item strong { color: #0f172a; } .dashboard { margin-left: 0; padding: 12px 0; max-width: none; } .exec-grid, .content-grid, .info-strip, .kpis, .timeline, .money-grid { display: block; } .panel, .exec-band, .timeline-card, .kpi, .info-card { break-inside: avoid; box-shadow: none; margin: 8px 0; } details, details:not([open]) > * { display: block !important; } summary { display: block; } }
+@media print { body { background: #ffffff; } .help-tab, .help-overlay, .help-toggle { display: none !important; } .layout { display: block; } .sidebar { position: static; width: auto; color: #0f172a; background: #ffffff; border-bottom: 1px solid #cbd5e1; } .sidebar .side-muted, .sidebar .side-item span { color: #334155; } .sidebar .side-item strong { color: #0f172a; } .dashboard { margin-left: 0; padding: 12px 0; max-width: none; } .exec-grid, .content-grid, .info-strip, .kpis, .timeline, .money-grid, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { display: block; } .panel, .exec-band, .timeline-card, .kpi, .info-card, .story-band { break-inside: avoid; box-shadow: none; margin: 8px 0; } details, details:not([open]) > * { display: block !important; } summary { display: block; } }
 @media (max-width: 920px) { .kpis { grid-template-columns: 1fr 1fr; } .timeline { grid-template-columns: 1fr 1fr 1fr; } }
-@media (max-width: 760px) { .layout { display: block; } .sidebar { position: static; width: auto; } .dashboard { margin-left: 0; padding: 14px; } .exec-grid, .content-grid, .info-strip { grid-template-columns: 1fr; } .kpis { grid-template-columns: 1fr; } .timeline { grid-template-columns: 1fr; } .wave-item-top { flex-direction: column; align-items: flex-start; } table { font-size: 11px; } }
+@media (max-width: 760px) { .layout { display: block; } .sidebar { position: static; width: auto; } .dashboard { margin-left: 0; padding: 14px; } .help-overlay { padding: 14px; } .exec-grid, .content-grid, .info-strip, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { grid-template-columns: 1fr; } .kpis { grid-template-columns: 1fr; } .timeline { grid-template-columns: 1fr; } .wave-item-top { flex-direction: column; align-items: flex-start; } .story-title { font-size: 20px; } table { font-size: 11px; } }
 </style>
 </head>
 <body>
+<input class="help-toggle" type="checkbox" id="report-help-toggle" />
+<div class="help-overlay">
+<div class="help-layer" role="dialog" aria-modal="true" aria-labelledby="report-help-title">
+<div class="help-layer-head"><h2 id="report-help-title">Report guide - concepts, fields and sections</h2><label class="help-close" for="report-help-toggle" title="Close report guide" aria-label="Close report guide">X</label></div>
+<div class="help-layer-body">
+<div class="legend-body">
+<div class="legend-grid">
+<section class="legend-box">
+<h3>Core concepts</h3>
+<dl>
+<div><dt>Retirement path</dt><dd>VMs with a compute SKU retirement signal from Advisor or Microsoft Learn. This is the main remediation population.</dd></div>
+<div><dt>Advisor-confirmed</dt><dd>Per-resource Advisor signal. It is stronger than a generic family exposure because Azure identified the specific VM.</dd></div>
+<div><dt>SKU-family exposure</dt><dd>The current VM size belongs to a retiring SKU family from Microsoft Learn, even when Advisor did not emit a per-resource row.</dd></div>
+<div><dt>Monitoring lifecycle</dt><dd>Dependency Agent / VM Insights Map lifecycle findings. These are intentionally separate and never counted as compute SKU retirements.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Wave model</h3>
+<dl>
+<div><dt>W0 Time-critical</dt><dd>Retirement risk is Critical/High. Calendar pressure wins over all other sequencing rules.</dd></div>
+<div><dt>W1 Advisor + sensitive</dt><dd>Advisor-confirmed VM on a sensitive workload. Use tighter change governance and validation.</dd></div>
+<div><dt>W2 Sensitive validation</dt><dd>Sensitive workload with same-generation resize. Lower technical change, but still validate workload behavior.</dd></div>
+<div><dt>W3 Architecture</dt><dd>Cross-family Gen1&rarr;Gen2 path. Validate image, drivers, boot/runtime assumptions, capacity and performance profile.</dd></div>
+<div><dt>W4 Low complexity</dt><dd>Standard same-generation resize lane. Best candidate for runbook-driven batch remediation.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Decision sections</h3>
+<dl>
+<div><dt>Decision Room</dt><dd>Management view: what to act on now, what needs validation, and what can move as quick wins.</dd></div>
+<div><dt>Risk vs Effort Matrix</dt><dd>Translates waves into execution lanes so risk and engineering effort are visible at a glance.</dd></div>
+<div><dt>Execution Scenarios</dt><dd>Conservative, balanced and accelerated views over the same facts. They do not change counts or recommendations.</dd></div>
+<div><dt>If We Do Nothing</dt><dd>Earliest dated retirement rows, useful as the escalation queue for planning.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Detail table fields</h3>
+<dl>
+<div><dt>Recommended SKU</dt><dd>Deterministic candidate target selected by the script; validate compatibility, quota, capacity and business constraints before change.</dd></div>
+<div><dt>Retail cost delta / month</dt><dd>PAYG/list-price estimate only. It excludes real negotiated pricing, RI/Savings Plan effects and workload-specific commercial adjustments.</dd></div>
+<div><dt>Validation</dt><dd>Checks and caveats that should be reviewed before migration, including generation change, sensitive workload and RI/SP flags.</dd></div>
+<div><dt>Next step</dt><dd>Suggested operational action for the row. It is guidance, not an approval to migrate.</dd></div>
+</dl>
+</section>
+</div>
+<div class="legend-inline"><span>Data is deterministic</span><span>No AI-generated numbers</span><span>Live-source provenance shown in sidebar</span><span>Costs are indicative only</span><span>Validate in Advisor, Service Health and Retirement Workbook</span></div>
+</div>
+</div>
+</div>
+</div>
 <div class="layout">
 <aside class="sidebar">
 <h1>Azure SKU Modernization Report</h1>
@@ -5136,12 +5292,13 @@ ul { margin-top: 8px; }
 <div class="side-item"><span>Live sources</span><strong>$(ConvertTo-HtmlText $liveSources)</strong></div>
 <div class="side-item"><span>Tenants / subscriptions</span><strong>$(ConvertTo-HtmlText $tenantCount) / $(ConvertTo-HtmlText $subscriptionCount)</strong></div>
 <div class="side-item"><span>As-of</span><strong>$(ConvertTo-HtmlText $asOfText)</strong></div>
+<label class="help-tab" for="report-help-toggle" title="Open report guide" aria-label="Open report guide">Legend</label>
 </aside>
 <main class="dashboard">
 <section class="exec-band">
 <div class="exec-grid">
 <div>
-<h2>Executive Summary</h2>
+<h2>Executive Summary<span class="info-dot" title="Fact-derived overview of retirement exposure, source split, generation split and retail delta.">i</span></h2>
 $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='exec-narrative'>$(ConvertTo-HtmlText $ExecutiveNarrativeText)</p>" } else { '' })
 <ul class="exec-bullets">
 <li><strong>Retirement path:</strong> $(ConvertTo-HtmlText $Facts.RetireCount) VM(s) = $(ConvertTo-HtmlText $Facts.AdvisorConfirmed) Advisor-confirmed + $(ConvertTo-HtmlText $Facts.SkuFamily) SKU-family exposure.</li>
@@ -5151,10 +5308,10 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 </ul>
 </div>
 <div class="kpis">
-<div class="kpi"><div class="kpi-label">Retirement path</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.RetireCount)</div></div>
-<div class="kpi"><div class="kpi-label">Advisor confirmed</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.AdvisorConfirmed)</div></div>
-<div class="kpi"><div class="kpi-label">SKU-family exposure</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.SkuFamily)</div></div>
-<div class="kpi"><div class="kpi-label">Retail delta / month</div><div class="kpi-value">$(ConvertTo-HtmlText $costImpact)</div></div>
+<div class="kpi"><div class="kpi-label">Retirement path<span class="info-dot" title="VMs on a compute SKU retirement path; monitoring lifecycle rows are excluded.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.RetireCount)</div></div>
+<div class="kpi"><div class="kpi-label">Advisor confirmed<span class="info-dot" title="Per-resource Azure Advisor retirement signal for a specific VM.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.AdvisorConfirmed)</div></div>
+<div class="kpi"><div class="kpi-label">SKU-family exposure<span class="info-dot" title="VM size belongs to a retiring SKU family from Microsoft Learn.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.SkuFamily)</div></div>
+<div class="kpi"><div class="kpi-label">Retail delta / month<span class="info-dot" title="PAYG/list-price estimate only; not negotiated price, RI/SP impact or validated saving.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $costImpact)</div></div>
 </div>
 </div>
 </section>
@@ -5165,40 +5322,97 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 <div class="info-card"><div class="info-label">RI / Savings Plan impact</div><div class="info-value">$(ConvertTo-HtmlText $commitmentImpactCount) flagged</div><div class="meta">Warning only; no cost math invented.</div></div>
 </section>
 
+<section class="story-band">
+<div class="story-kicker">Decision Room<span class="info-dot" title="Management view that groups deterministic waves into immediate action, validation and quick-win lanes.">i</span></div>
+<div class="story-title">90-day modernization playbook</div>
+<p class="story-subtitle">Use the deterministic wave output to drive sequencing decisions: what to execute now, what to validate, and what can move as quick wins.</p>
+<span class="story-status">$(ConvertTo-HtmlText $statusLine)</span>
+
+<div class="decision-grid">
+<article class="decision-card">
+<div class="decision-tag">This sprint</div>
+<div class="decision-value">$(ConvertTo-HtmlText $actNowCount)</div>
+<div class="decision-title">Act now (W0 + W1)</div>
+<div class="decision-note">Time-critical or Advisor-confirmed sensitive workloads that should be prioritized in immediate change windows.</div>
+</article>
+<article class="decision-card">
+<div class="decision-tag">Next wave</div>
+<div class="decision-value">$(ConvertTo-HtmlText $planNowCount)</div>
+<div class="decision-title">Plan with validation (W2 + W3)</div>
+<div class="decision-note">Workloads with moderate/high technical validation effort that need architecture and application checks before cutover.</div>
+</article>
+<article class="decision-card">
+<div class="decision-tag">Quick wins</div>
+<div class="decision-value">$(ConvertTo-HtmlText $quickWinCount)</div>
+<div class="decision-title">Low-complexity moves (W4)</div>
+<div class="decision-note">Candidate moves for accelerated execution batches, often suitable for standard runbooks.</div>
+</article>
+</div>
+
+<div class="confidence-line">
+<span class="confidence-chip">Advisor-confirmed share: $(ConvertTo-HtmlText $advisorConfidencePercent)% of retirement-path VMs</span>
+<span class="confidence-chip">Live source status: $(ConvertTo-HtmlText $liveCoverage)</span>
+<span class="confidence-chip">Monitoring kept separate: $(ConvertTo-HtmlText $Facts.MonitoringDistinctVmCount) VM(s)</span>
+</div>
+</section>
+
 <div class="content-grid">
-<div>
 <section class="panel">
-<h2>Remediation Plan (waves)</h2>
-<div class="timeline">$($timelineBuilder.ToString())</div>
-$($waveBuilder.ToString())
+<h2>Risk vs Effort Matrix<span class="info-dot" title="Maps waves into execution lanes using existing wave counts; it does not recompute or reclassify rows.">i</span></h2>
+<div class="matrix-grid">
+<article class="matrix-cell cell-high-low">
+<div class="matrix-axis">High risk · Lower effort</div>
+<div class="matrix-head"><span class="matrix-title">Immediate execution lane</span><span class="matrix-count">$(ConvertTo-HtmlText $w0Count)</span></div>
+<p class="matrix-note">W0 workloads: retirement timeline risk dominates, so execution urgency is highest.</p>
+</article>
+<article class="matrix-cell cell-high-high">
+<div class="matrix-axis">High risk · Higher effort</div>
+<div class="matrix-head"><span class="matrix-title">Governed execution lane</span><span class="matrix-count">$(ConvertTo-HtmlText ($w1Count + $w3Count))</span></div>
+<p class="matrix-note">W1 and W3 workloads: sensitive or cross-family Gen1&rarr;Gen2 changes requiring stronger governance and validation.</p>
+</article>
+<article class="matrix-cell cell-low-high">
+<div class="matrix-axis">Lower risk · Higher effort</div>
+<div class="matrix-head"><span class="matrix-title">Engineering validation lane</span><span class="matrix-count">$(ConvertTo-HtmlText $w2Count)</span></div>
+<p class="matrix-note">W2 workloads: sensitive but same-generation; schedule non-production validation before scale rollout.</p>
+</article>
+<article class="matrix-cell cell-low-low">
+<div class="matrix-axis">Lower risk · Lower effort</div>
+<div class="matrix-head"><span class="matrix-title">Quick-win lane</span><span class="matrix-count">$(ConvertTo-HtmlText $w4Count)</span></div>
+<p class="matrix-note">W4 workloads: standard, low-complexity moves suitable for bulk remediation windows.</p>
+</article>
+</div>
 </section>
 
 <section class="panel">
-<h2>Summary by Change Type</h2>
-<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div></div></div>
-</section>
-
-<section class="panel">
-<h2>Cost Impact (monthly)</h2>
-$(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Total increase</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $increaseValue))</div></div><div class='money-cell'><div class='money-label'>Total decrease</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $decreaseValue))</div></div><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" } else { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" })
-</section>
+<h2>Execution Scenarios<span class="info-dot" title="Alternative rollout views over the same facts: conservative, balanced and accelerated.">i</span></h2>
+<div class="scenario-grid">
+<article class="scenario-card">
+<h3>Conservative</h3>
+<div class="scenario-count">$(ConvertTo-HtmlText $actNowCount)</div>
+<p>Focus only on W0 + W1 to reduce near-term retirement exposure with controlled blast radius.</p>
+</article>
+<article class="scenario-card">
+<h3>Balanced</h3>
+<div class="scenario-count">$(ConvertTo-HtmlText ($actNowCount + $w2Count))</div>
+<p>Execute W0 + W1 and start W2 in parallel to reduce backlog while keeping architectural risk bounded.</p>
+</article>
+<article class="scenario-card">
+<h3>Accelerated</h3>
+<div class="scenario-count">$(ConvertTo-HtmlText $Facts.RetireCount)</div>
+<p>Run all waves with strict readiness gates and dedicated architecture validation for W3.</p>
+</article>
 </div>
-
-<aside class="panel monitoring-panel">
-<h2>Monitoring Lifecycle</h2>
-<span class="outside-count">Separate track &middot; outside compute retirement count</span>
-$(if ($monitoringCount -gt 0) { "<p>Dependency Agent / VM Insights Map retirement is tracked separately and does not contribute to the $(ConvertTo-HtmlText $Facts.RetireCount) compute retirement count.</p>" } else { "<p>No Dependency Agent / VM Insights Map action detected in this scope.</p>" })
-<div class="kpis">
-<div class="kpi"><div class="kpi-label">Confirmed</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringConfirmed)</div></div>
-<div class="kpi"><div class="kpi-label">Unconfirmed</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringUnconfirmed)</div></div>
-<div class="kpi"><div class="kpi-label">Unknown</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringUnknown)</div></div>
-</div>
-$monitoringTableHtml
-</aside>
+</section>
 </div>
 
 <section class="panel">
-<h2>CSA / Engineer Detail</h2>
+<h2>If We Do Nothing<span class="info-dot" title="Earliest dated retirement rows in scope, useful for escalation and planning.">i</span></h2>
+<p class="meta">Top dated retirements in scope; use this list as the minimum escalation queue for operational planning.</p>
+$($countdownBuilder.ToString())
+</section>
+
+<section class="panel">
+<h2>CSA / Engineer Detail<span class="info-dot" title="Per-VM implementation view: wave, source, OS pricing basis, target SKU, validation caveats and next step.">i</span></h2>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU</th><th>Retail cost delta / month</th><th>Validation</th><th>Next step</th></tr></thead>
@@ -5252,6 +5466,40 @@ $monitoringTableHtml
 </tbody>
 </table>
 </div>
+</section>
+
+<div class="content-grid">
+<div>
+<section class="panel">
+<h2>Summary by Change Type</h2>
+<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div></div></div>
+</section>
+</div>
+
+<div>
+<section class="panel">
+<h2>Cost Impact (monthly)</h2>
+$(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Total increase</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $increaseValue))</div></div><div class='money-cell'><div class='money-label'>Total decrease</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $decreaseValue))</div></div><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" } else { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" })
+</section>
+</div>
+</div>
+
+<section class="panel">
+<h2>Remediation Plan (waves)</h2>
+<div class="timeline">$($timelineBuilder.ToString())</div>
+$($waveBuilder.ToString())
+</section>
+
+<section class="panel monitoring-panel">
+<h2>Monitoring Lifecycle</h2>
+<span class="outside-count">Separate track &middot; outside compute retirement count</span>
+$(if ($monitoringCount -gt 0) { "<p>Dependency Agent / VM Insights Map retirement is tracked separately and does not contribute to the $(ConvertTo-HtmlText $Facts.RetireCount) compute retirement count.</p>" } else { "<p>No Dependency Agent / VM Insights Map action detected in this scope.</p>" })
+<div class="kpis">
+<div class="kpi"><div class="kpi-label">Confirmed</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringConfirmed)</div></div>
+<div class="kpi"><div class="kpi-label">Unconfirmed</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringUnconfirmed)</div></div>
+<div class="kpi"><div class="kpi-label">Unknown</div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.MonitoringUnknown)</div></div>
+</div>
+$monitoringTableHtml
 </section>
 
 <details class="accordion" open>
@@ -5464,9 +5712,9 @@ try {
     $script:ApiLogCsvPath = Join-Path $runDir "api_calls_log.csv"
     $script:RunLogPath = Join-Path $runDir "run_activity.log"
 
-    Ensure-Directory -Path $OutputRoot
-    Ensure-Directory -Path $runDir
-    Ensure-Directory -Path $snapshotDir
+    New-DirectoryIfMissing -Path $OutputRoot
+    New-DirectoryIfMissing -Path $runDir
+    New-DirectoryIfMissing -Path $snapshotDir
 
     $runHeader = "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))][INFO] Run log initialized at '$($script:RunLogPath)'"
     Set-Content -LiteralPath $script:RunLogPath -Value $runHeader -Encoding UTF8
@@ -5475,12 +5723,12 @@ try {
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Initializing modules"
 
-    Ensure-Module -Name Az.Accounts
-    Ensure-Module -Name Az.ResourceGraph
-    Ensure-Module -Name Az.Compute
+    Assert-ModuleInstalled -Name Az.Accounts
+    Assert-ModuleInstalled -Name Az.ResourceGraph
+    Assert-ModuleInstalled -Name Az.Compute
 
     if (-not $SkipAdvisor) {
-        Ensure-Module -Name Az.Advisor
+        Assert-ModuleInstalled -Name Az.Advisor
     }
 
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
@@ -5583,7 +5831,7 @@ try {
     if (-not $effectiveCacheRoot) {
         $effectiveCacheRoot = Join-Path $OutputRoot "cache"
     }
-    Ensure-Directory -Path $effectiveCacheRoot
+    New-DirectoryIfMissing -Path $effectiveCacheRoot
 
     $forceSkuCacheRefresh = [bool]$ForceRefreshCache
     $forceRetailCacheRefresh = [bool]$ForceRefreshCache
@@ -5650,7 +5898,7 @@ try {
 
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Loading retirement data"
-    $retirements = Load-Retirements -UseOfficialList $UseOfficialRetirementList -UsePortalSource $UsePortalRetirementSource -Subscriptions $effectiveSubscriptionIds -AdvisorRetirementTypeIdBlocklist $AdvisorRetirementTypeIdBlocklist -AdvisorRetirementNameBlockPattern $AdvisorRetirementNameBlockPattern -RequireLiveRetirementSource $RequireLiveRetirementSource
+    $retirements = Get-Retirements -UseOfficialList $UseOfficialRetirementList -UsePortalSource $UsePortalRetirementSource -Subscriptions $effectiveSubscriptionIds -AdvisorRetirementTypeIdBlocklist $AdvisorRetirementTypeIdBlocklist -AdvisorRetirementNameBlockPattern $AdvisorRetirementNameBlockPattern -RequireLiveRetirementSource $RequireLiveRetirementSource
 
     # Monitoring-lifecycle track (Dependency Agent / VM Insights Map EOL): confirm real agent presence
     # so the separate track shows deterministic Confirmed/Unconfirmed/Unknown instead of a vague caveat.
@@ -5735,6 +5983,7 @@ catch {
     Write-Log $_.Exception.Message "ERROR"
     throw
 }
+
 
 
 
