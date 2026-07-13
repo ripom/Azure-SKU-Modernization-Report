@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4 - 2026-07-13
+
+- Added always-visible **Preview Sidecar Coverage** counts in the CSA / Engineer view so VMSS and Batch scanned/impacted totals remain visible even when a sidecar has zero affected resources.
+- Added Azure Batch Management REST fallback discovery so Batch pools are listed per Batch account across the subscription scope even when Azure Resource Graph does not return pool child resources.
+- Added `-BatchManagementApiVersion` to control the Azure Batch Management API contract version used by the Batch pool fallback.
+- Updated Batch inventory logging to show Resource Graph pool discovery, Batch account discovery and Azure Batch Management REST pool listing separately.
+
 ## v0.3 - 2026-07-13
 
 - Added **Azure Batch Pool Exposure** as a Public Preview capability: Batch pool `vmSize` values are scanned from Resource Graph and matched against the existing live VM-size retirement sources, while remaining separate from VM counts and remediation waves.

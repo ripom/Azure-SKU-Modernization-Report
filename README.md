@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.3`
+**Current version:** `v0.4`
 
 Generates a fully deterministic Azure VM modernization report (SKU retirements, migration candidates,
 retail cost delta, readiness) including a fact-derived executive dashboard. Output: CSV, JSON
@@ -85,6 +85,7 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
   [-SkipRetailApi] `
   [-Currency <string>] `
   [-RequireLiveRetirementSource <bool>] `
+  [-BatchManagementApiVersion <string>] `
   [-ForceRefreshCache]
 ```
 
@@ -176,8 +177,9 @@ Audience views:
   Decision Room. It keeps the big picture visible: total compute exposure, standalone VM wave counts,
   VMSS/Batch preview count, nearest deadline, retail delta, RI cutoff planning and monitoring count.
 - **CSA / Engineer:** implementation detail for standalone VMs plus Public Preview sidecars. It
-  includes the per-VM CSA / Engineer table, Preview Remediation Queue for VMSS/Batch, Batch pool
-  exposure, VMSS exposure and Monitoring Lifecycle technical detail. The VM table is ordered by
+  includes the per-VM CSA / Engineer table, Preview Sidecar Coverage counts, Preview Remediation
+  Queue for VMSS/Batch, Batch pool exposure, VMSS exposure and Monitoring Lifecycle technical detail.
+  The VM table is ordered by
   remediation wave (`W0` to `W4`), then retirement date and VM name; cost columns are intentionally
   excluded from this engineering view.
 - **Project Plan:** delivery view for PMs and migration leads. It contains Summary by Change Type,
@@ -351,6 +353,7 @@ default and effect.
 | `-RetailApiTimeoutSec` | `int` | `15` | Timeout (s) per single Retail request. |
 | `-UseResourceSkusRestApi` | `bool` | `$true` | Uses the Resource SKUs REST API for the catalog; with `$false` uses `Get-AzComputeResourceSku`. |
 | `-ResourceSkusApiVersion` | `string` | `2026-03-02` | Azure Resource Manager API contract version used only for `Microsoft.Compute/skus`. It is not a report as-of date, retirement cutoff date or RI cutoff date. |
+| `-BatchManagementApiVersion` | `string` | `2025-06-01` | Azure Batch Management API contract version used to list pools under each Batch account when Resource Graph does not expose pool child resources. |
 | `-IncludeExtendedLocationsInSkuApi` | `bool` | `$true` | Includes extended locations in the SKU catalog query. |
 
 Change `-ResourceSkusApiVersion` only if the Resource SKUs REST call fails because the selected API

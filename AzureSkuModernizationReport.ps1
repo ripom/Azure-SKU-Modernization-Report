@@ -110,6 +110,9 @@ param(
     [string]$ResourceSkusApiVersion = "2026-03-02",
 
     [Parameter(Mandatory = $false)]
+    [string]$BatchManagementApiVersion = "2025-06-01",
+
+    [Parameter(Mandatory = $false)]
     [bool]$IncludeExtendedLocationsInSkuApi = $true,
 
     [Parameter(Mandatory = $false)]
@@ -1422,7 +1425,8 @@ Resources
 
 function Get-ResourceGraphBatchPoolInventory {
     param(
-        [Parameter(Mandatory = $false)][string[]]$Subscriptions
+        [Parameter(Mandatory = $false)][string[]]$Subscriptions,
+        [Parameter(Mandatory = $false)][string]$BatchApiVersion = "2025-06-01"
     )
 
     $query = @"
@@ -1441,6 +1445,12 @@ Resources
 | project subscriptionId, resourceGroup, idLower, location, batchAccountName, poolName, vmSize, allocationState, targetDedicatedNodes, targetLowPriorityNodes, targetSpotNodes, currentDedicatedNodes, currentLowPriorityNodes
 "@
 
+    $accountQuery = @"
+Resources
+| where type =~ 'microsoft.batch/batchaccounts'
+| project subscriptionId, resourceGroup, name, location
+"@
+
     $subList = @($Subscriptions)
     if (@($subList).Count -eq 0) {
         $ctx = Get-AzContext -ErrorAction SilentlyContinue
@@ -1450,6 +1460,7 @@ Resources
     }
 
     $inventory = New-Object 'System.Collections.Generic.List[object]'
+    $batchAccounts = New-Object 'System.Collections.Generic.List[object]'
     foreach ($subId in $subList) {
         $pageSize = 1000
         $skipToken = $null
@@ -1496,6 +1507,125 @@ Resources
             }
             $skipToken = if ($page) { $page.SkipToken } else { $null }
         } while ($skipToken)
+
+        $skipToken = $null
+        do {
+            $accountGraphArgs = @{
+                Query        = $accountQuery
+                First        = $pageSize
+                Subscription = [string]$subId
+            }
+            if ($skipToken) {
+                $accountGraphArgs['SkipToken'] = $skipToken
+            }
+
+            $accountSearchStart = Get-Date
+            try {
+                $accountPage = Search-AzGraph @accountGraphArgs
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'BatchAccountsPublicPreview' -StartedAt $accountSearchStart -EndedAt (Get-Date) -Success $true -Meta @{ ReturnedRows = @($accountPage).Count }
+            }
+            catch {
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'BatchAccountsPublicPreview' -StartedAt $accountSearchStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
+                Write-Log "Batch account public preview inventory failed on subscription ${subId}: $($_.Exception.Message)" 'WARN'
+                break
+            }
+
+            foreach ($account in @($accountPage)) {
+                $batchAccounts.Add([pscustomobject]@{
+                    SubscriptionId = [string]$account.subscriptionId
+                    ResourceGroup  = [string]$account.resourceGroup
+                    AccountName    = [string]$account.name
+                    Location       = ConvertTo-NormalizedLocation ([string]$account.location)
+                }) | Out-Null
+            }
+            $skipToken = if ($accountPage) { $accountPage.SkipToken } else { $null }
+        } while ($skipToken)
+    }
+
+    if ($batchAccounts.Count -eq 0) {
+        Write-Log 'Batch pool public preview: no Batch accounts found in subscription scope.'
+        return $inventory.ToArray()
+    }
+
+    Write-Log "Batch pool public preview: found $($batchAccounts.Count) Batch account(s); listing pools with Azure Batch Management REST API version $BatchApiVersion."
+
+    $tokenValue = $null
+    $tokenStart = Get-Date
+    try {
+        $token = Get-AzAccessToken -ResourceUrl 'https://management.azure.com/'
+        Add-ApiCallLog -Api 'Get-AzAccessToken' -Provider 'Az.Accounts' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request 'ResourceUrl=https://management.azure.com/;BatchPoolsPublicPreview' -StartedAt $tokenStart -EndedAt (Get-Date) -Success $true
+        if ($token -and $token.PSObject.Properties.Match('Token').Count -gt 0 -and $token.Token) {
+            if ($token.Token -is [System.Security.SecureString]) {
+                $tokenValue = [System.Net.NetworkCredential]::new('', $token.Token).Password
+            }
+            else {
+                $tokenValue = [string]$token.Token
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($tokenValue)) {
+            throw 'Get-AzAccessToken returned an empty token value.'
+        }
+    }
+    catch {
+        Add-ApiCallLog -Api 'Get-AzAccessToken' -Provider 'Az.Accounts' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request 'ResourceUrl=https://management.azure.com/;BatchPoolsPublicPreview' -StartedAt $tokenStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
+        Write-Log "Batch pool public preview REST fallback skipped: unable to acquire ARM token. $($_.Exception.Message)" 'WARN'
+        return $inventory.ToArray()
+    }
+
+    $headers = @{ Authorization = "Bearer $tokenValue" }
+    $seenPoolIds = @{}
+    foreach ($existingPool in @($inventory.ToArray())) {
+        if ($existingPool.PSObject.Properties.Match('ResourceId').Count -gt 0 -and $existingPool.ResourceId) {
+            $seenPoolIds[[string]$existingPool.ResourceId] = $true
+        }
+    }
+
+    foreach ($account in @($batchAccounts.ToArray())) {
+        if ([string]::IsNullOrWhiteSpace([string]$account.SubscriptionId) -or [string]::IsNullOrWhiteSpace([string]$account.ResourceGroup) -or [string]::IsNullOrWhiteSpace([string]$account.AccountName)) { continue }
+        $encodedResourceGroup = [uri]::EscapeDataString([string]$account.ResourceGroup)
+        $encodedAccountName = [uri]::EscapeDataString([string]$account.AccountName)
+        $url = "https://management.azure.com/subscriptions/$($account.SubscriptionId)/resourceGroups/$encodedResourceGroup/providers/Microsoft.Batch/batchAccounts/$encodedAccountName/pools?api-version=$BatchApiVersion"
+        while ($url) {
+            $poolRestStart = Get-Date
+            try {
+                $resp = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
+                Add-ApiCallLog -Api 'Invoke-RestMethod' -Provider 'AzureBatchManagement' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$account.SubscriptionId) -Request $url -StartedAt $poolRestStart -EndedAt (Get-Date) -Success $true -Meta @{ Account = [string]$account.AccountName; Items = @($resp.value).Count }
+            }
+            catch {
+                Add-ApiCallLog -Api 'Invoke-RestMethod' -Provider 'AzureBatchManagement' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$account.SubscriptionId) -Request $url -StartedAt $poolRestStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message -Meta @{ Account = [string]$account.AccountName }
+                Write-Log "Batch pool public preview REST fallback failed for account $($account.AccountName) in subscription $($account.SubscriptionId): $($_.Exception.Message)" 'WARN'
+                break
+            }
+
+            foreach ($pool in @($resp.value)) {
+                if (-not $pool) { continue }
+                $poolId = if ($pool.PSObject.Properties.Match('id').Count -gt 0 -and $pool.id) { ([string]$pool.id).ToLowerInvariant() } else { "/subscriptions/$($account.SubscriptionId)/resourceGroups/$($account.ResourceGroup)/providers/Microsoft.Batch/batchAccounts/$($account.AccountName)/pools/$($pool.name)".ToLowerInvariant() }
+                if ($seenPoolIds.ContainsKey($poolId)) { continue }
+                $seenPoolIds[$poolId] = $true
+
+                $properties = if ($pool.PSObject.Properties.Match('properties').Count -gt 0 -and $pool.properties) { $pool.properties } else { $null }
+                $fixedScale = if ($properties -and $properties.PSObject.Properties.Match('scaleSettings').Count -gt 0 -and $properties.scaleSettings -and $properties.scaleSettings.PSObject.Properties.Match('fixedScale').Count -gt 0) { $properties.scaleSettings.fixedScale } else { $null }
+                $poolName = if ($pool.PSObject.Properties.Match('name').Count -gt 0 -and $pool.name) { [string]$pool.name } else { ($poolId -split '/')[-1] }
+
+                $inventory.Add([pscustomobject]@{
+                    ResourceId              = $poolId
+                    SubscriptionId          = [string]$account.SubscriptionId
+                    ResourceGroup           = [string]$account.ResourceGroup
+                    BatchAccountName        = [string]$account.AccountName
+                    PoolName                = $poolName
+                    Location                = [string]$account.Location
+                    VmSize                  = if ($properties -and $properties.PSObject.Properties.Match('vmSize').Count -gt 0) { [string]$properties.vmSize } else { '' }
+                    AllocationState         = if ($properties -and $properties.PSObject.Properties.Match('allocationState').Count -gt 0 -and $properties.allocationState) { [string]$properties.allocationState } else { 'N/A' }
+                    TargetDedicatedNodes    = if ($fixedScale -and $fixedScale.PSObject.Properties.Match('targetDedicatedNodes').Count -gt 0 -and $null -ne $fixedScale.targetDedicatedNodes) { [string]$fixedScale.targetDedicatedNodes } else { 'N/A' }
+                    TargetLowPriorityNodes  = if ($fixedScale -and $fixedScale.PSObject.Properties.Match('targetLowPriorityNodes').Count -gt 0 -and $null -ne $fixedScale.targetLowPriorityNodes) { [string]$fixedScale.targetLowPriorityNodes } else { 'N/A' }
+                    TargetSpotNodes         = 'N/A'
+                    CurrentDedicatedNodes   = if ($properties -and $properties.PSObject.Properties.Match('currentDedicatedNodes').Count -gt 0 -and $null -ne $properties.currentDedicatedNodes) { [string]$properties.currentDedicatedNodes } else { 'N/A' }
+                    CurrentLowPriorityNodes = if ($properties -and $properties.PSObject.Properties.Match('currentLowPriorityNodes').Count -gt 0 -and $null -ne $properties.currentLowPriorityNodes) { [string]$properties.currentLowPriorityNodes } else { 'N/A' }
+                }) | Out-Null
+            }
+
+            $url = if ($resp -and $resp.PSObject.Properties.Match('nextLink').Count -gt 0 -and $resp.nextLink) { [string]$resp.nextLink } else { $null }
+        }
     }
 
     return $inventory.ToArray()
@@ -5320,6 +5450,17 @@ function ConvertTo-SimplifiedReportHtml {
     $computeRetirementCount = [int]$Facts.RetireCount + $sidecarRetirementCount
     $computeScannedCount = [int]$Facts.TotalVmCount + $batchPreviewScanned + $vmssPreviewScanned
 
+    $previewCoverageHtml = @"
+<section class="panel preview-panel">
+<h2>Preview Sidecar Coverage <span class="tag tag-preview">Public Preview</span></h2>
+<p class="meta">VMSS and Batch are scanned as separate compute sidecars. They are visible here even when zero resources are impacted, and remain outside standalone VM waves and backlog counts.</p>
+<div class="kpis preview-kpis">
+<div class="kpi"><div class="kpi-label">VMSS scanned</div><div class="kpi-value">$(ConvertTo-HtmlText $vmssPreviewScanned)</div><div class="kpi-sub">$(ConvertTo-HtmlText $vmssPreviewRows.Count) on retirement path</div></div>
+<div class="kpi"><div class="kpi-label">Batch pools scanned</div><div class="kpi-value">$(ConvertTo-HtmlText $batchPreviewScanned)</div><div class="kpi-sub">$(ConvertTo-HtmlText $batchPreviewRows.Count) on retirement path</div></div>
+</div>
+</section>
+"@
+
     $generatedUtc = if ($Provenance -and $Provenance.PSObject.Properties.Match('GeneratedUtc').Count -gt 0) { [string]$Provenance.GeneratedUtc } else { [string]$Facts.GeneratedAtUtc }
     $tenantCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('TenantCount').Count -gt 0) { [string]$Provenance.TenantCount } else { '' }
     $subscriptionCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('SubscriptionCount').Count -gt 0) { [string]$Provenance.SubscriptionCount } else { '' }
@@ -6140,6 +6281,8 @@ $($waveBuilder.ToString())
 </div>
 </section>
 
+$previewCoverageHtml
+
 $previewRemediationHtml
 
 $batchPoolPreviewHtml
@@ -6591,8 +6734,8 @@ try {
     Write-Log "Collecting VM inventory from Resource Graph"
     $inventory = Get-ResourceGraphVmInventory -Subscriptions $effectiveSubscriptionIds
 
-    Write-Log "Collecting Azure Batch pool inventory (public preview capability) from Resource Graph"
-    $batchPoolInventory = Get-ResourceGraphBatchPoolInventory -Subscriptions $effectiveSubscriptionIds
+    Write-Log "Collecting Azure Batch pool inventory (public preview capability) from Resource Graph and Batch Management REST"
+    $batchPoolInventory = Get-ResourceGraphBatchPoolInventory -Subscriptions $effectiveSubscriptionIds -BatchApiVersion $BatchManagementApiVersion
 
     Write-Log "Collecting VM Scale Set inventory (public preview capability) from Resource Graph"
     $vmssInventory = Get-ResourceGraphVmssInventory -Subscriptions $effectiveSubscriptionIds
