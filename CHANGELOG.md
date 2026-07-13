@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5 - 2026-07-13
+
+- Added Microsoft Release Communications RSS as Stream C official-communications context.
+- Added `-UseReleaseCommunicationRss`, `-ReleaseCommunicationRssUrl` and `-RssLookbackMonths` parameters.
+- Added RSS classification into **Corroborated**, **FinOps** and **Review-only** buckets in the Coverage tab.
+- Tightened RSS Corroborated matching to require a retirement notice with compute context and an explicit per-notice VM series mention; short family tokens such as `B` or `F` are no longer accepted.
+- Added non-fatal RSS fetching: feed failures are logged and rendered as unavailable, while report numbers remain unchanged.
+- Hardened RSS XML parsing for BOM/encoding edge cases so a valid feed is not rendered as unavailable after a successful HTTP fetch.
+- Added `Assert-CountsUnchangedAfterRss` so RSS context cannot alter retirement counts, source split, monitoring counts or remediation wave totals.
+- Added `ReleaseCommunicationContext` to the JSON output and sidebar provenance/status for RSS checks.
+- Fixed sidebar subscription provenance so the subscription count comes from the resolved in-scope subscription set, not only from subscriptions that produced report rows; mismatches are now logged explicitly.
+- Updated the anonymized rendered HTML example to the v0.5 report layout, including RSS context, scope-based subscription provenance and the latest Decision Room totals.
+- Documented Stream C semantics in README: RSS is context-only and never creates retirement rows, CSV rows, waves or backlog items.
+
 ## v0.4 - 2026-07-13
 
 - Added always-visible **Preview Sidecar Coverage** counts in the CSA / Engineer view so VMSS and Batch scanned/impacted totals remain visible even when a sidecar has zero affected resources.

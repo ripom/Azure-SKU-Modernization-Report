@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.4`
+**Current version:** `v0.5`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -37,6 +37,10 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
     so every SKU family (present and future) is captured automatically.
   - Stream B: Microsoft Learn markdown (SKU-family)
   - No hardcoded fallback list.
+- **Release Communications RSS is context-only.** Stream C reads the Microsoft Release Communications
+  RSS feed for official public communications in the selected lookback window. RSS items are rendered
+  as **Corroborated**, **FinOps** or **Review-only** context, but they never create retirement rows,
+  change executive counts, alter remediation waves or add backlog items.
 - **Retirement vs upgrade split.** The Advisor subcategory contains both genuine retirements and
   pure upgrade prompts. A signal is treated as a **retirement** only when it carries a retirement
   date; upgrade-only signals (no date) are captured separately and are **not** counted on the
@@ -167,6 +171,9 @@ reservation inventory, invoices, negotiated prices, or Cost Management data.
   [-Currency <string>] `
   [-RequireLiveRetirementSource <bool>] `
   [-BatchManagementApiVersion <string>] `
+  [-UseReleaseCommunicationRss <bool>] `
+  [-ReleaseCommunicationRssUrl <string>] `
+  [-RssLookbackMonths <int>] `
   [-ForceRefreshCache]
 ```
 
@@ -229,15 +236,18 @@ At a high level the script follows this deterministic pipeline:
 2. **Retirement sources:** loads live retirement signals from Azure Advisor Resource Graph and the
   Microsoft Learn SKU-family source. Upgrade-only Advisor prompts without retirement dates are not
   counted as retirements.
-3. **SKU and price catalog:** loads compute SKU metadata plus Retail Prices data, using local caches
+3. **Release Communications context:** reads Microsoft Release Communications RSS for official public
+  notices and classifies relevant items as Corroborated, FinOps or Review-only. This stream is
+  context-only and has a counts-unchanged guard.
+4. **SKU and price catalog:** loads compute SKU metadata plus Retail Prices data, using local caches
   when complete and fresh.
-4. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
+5. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
   quota/capacity and validation caveats.
-5. **Classification:** builds standalone VM retirement facts, remediation waves and sidecar previews
+6. **Classification:** builds standalone VM retirement facts, remediation waves and sidecar previews
   for Batch, VMSS and RI cutoff planning.
-6. **Validation gates:** checks source health, fact reconciliation, monitoring separation, OS-aware
+7. **Validation gates:** checks source health, fact reconciliation, monitoring separation, OS-aware
   pricing and delivery readiness before writing the report.
-7. **Output generation:** writes CSV, JSON, HTML and logs into the timestamped output folder.
+8. **Output generation:** writes CSV, JSON, HTML and logs into the timestamped output folder.
 
 The HTML is a presentation layer over computed facts. It does not invent new counts or reclassify rows.
 
@@ -449,6 +459,9 @@ restriction metadata, but it does not change retirement-source logic or remediat
 | `-UseOfficialRetirementList` | `bool` | `$true` | Enables Stream B (Microsoft Learn markdown, SKU-family). |
 | `-UsePortalRetirementSource` | `bool` | `$true` | Enables Stream A (Azure Advisor via ARG, per-resource). |
 | `-RequireLiveRetirementSource` | `bool` | `$false` | If `$true` and **both** live sources fail, the script terminates with an error instead of proceeding with partial data. |
+| `-UseReleaseCommunicationRss` | `bool` | `$true` | Enables Stream C (Microsoft Release Communications RSS) as read-only official-communications context. It does not affect counts, waves, CSV rows or backlog items. |
+| `-ReleaseCommunicationRssUrl` | `string` | Microsoft Azure RSS endpoint | RSS feed URL for Release Communications. Change only for testing or cloud-specific routing. |
+| `-RssLookbackMonths` | `int` | `12` | Lookback window for RSS notices rendered in the Coverage tab. |
 | `-AdvisorRetirementTypeIdBlocklist` | `string[]` | 2 GUIDs (Dependency Agent / VM Insights Map) | Advisor Type IDs that are monitoring lifecycle signals and must **never** become compute SKU retirements. |
 | `-AdvisorRetirementNameBlockPattern` | `string` | agent/monitoring regex | Fallback text match (Option B) to exclude agent/monitoring recommendations not present in the blocklist. |
 
@@ -477,7 +490,7 @@ folder contains the human report, structured data files and audit logs for the s
 |---|---|---|
 | `sku_modernization_report.html` | CXO, CSA/Engineer, PM, FinOps | Open in a browser. This is the main self-contained report with left-side audience views: Executive Overview, CSA / Engineer, Project Plan, FinOps and Coverage. Use it for review meetings and PDF export. |
 | `sku_modernization_report.csv` | CSA/Engineer, FinOps | Flat per-VM retirement-path dataset. Use in Excel/Power BI for filtering by VM, region, current SKU, recommended SKU, wave, cost delta and validation notes. |
-| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data. Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
+| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data, including `ReleaseCommunicationContext` when RSS is enabled. Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
 | `migration_backlog_items.csv` | PM, delivery lead | Work-item/backlog-friendly extract for remediation planning. Import into Azure DevOps, Planner, Jira or a spreadsheet to track owner, wave, target SKU and execution status. |
 | `advisor_hints.json` | CSA/Engineer, troubleshooting | Raw Advisor-related hints captured during analysis. Use to verify why a row was treated as Advisor-confirmed or to reconcile with Azure Advisor/Workbook views. |
 | `api_calls_log.csv` | Operations, audit | Tabular API-call trace with provider, request metadata and success/failure state. Use for quick filtering and evidence collection. |
@@ -533,6 +546,10 @@ downgrades to `WARN`) on a specific class of defect, so a wrong number never rea
   - `AdvisorConfirmed + SkuFamily == RetireCount` (retirement-path quadrature).
   - `CostCovered + CostMissing == RetireCount`.
   - `SkuChangeWithGenChange + SkuChangeWithoutGenChange == recommended-SKU rows`.
+- **`Assert-CountsUnchangedAfterRss`** — hard invariant for Stream C:
+  - Release Communications RSS may add official context only.
+  - Retirement counts, source split, monitoring count and remediation wave totals must be identical
+    before and after RSS ingest, otherwise report generation stops.
   - Monitoring presence counters reconcile to the distinct monitoring VM count; no duplicate monitoring
     `ResourceId`; a monitoring row can be `Confirmed` only from a Dependency-Agent ARG detection.
   - **`AdvisorConfirmed == advisor rows with a real Advisor recommendation ID`** — every
