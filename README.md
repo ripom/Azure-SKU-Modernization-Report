@@ -90,38 +90,62 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 
 - PowerShell 7+
 - Azure sign-in already completed (`Connect-AzAccount`)
-- Reader role on the analyzed subscriptions
+- Azure read permissions on the analyzed scope. The easiest reliable assignment is `Reader` on each
+  analyzed subscription; stricter custom-role options are described below.
 
 ## Minimum Azure permissions
 
 The script is read-only. It does not resize VMs, change VMSS models, change Batch pools, create
-reservations, or modify Azure resources. The minimum practical permission is **Reader** on every
-subscription you want to analyze.
+reservations, or modify Azure resources. There are two useful ways to think about permissions:
 
-Recommended assignment:
+- **Recommended minimum, lowest effort:** assign the built-in `Reader` role at subscription scope.
+  This is the simplest permission model and gives the most complete report.
+- **Strict least privilege:** use a custom read-only role with only the resource-provider read actions
+  the script needs. This is more precise, but it requires more governance work and still needs some
+  subscription-scope reads for Advisor, Resource Graph and Compute SKU availability.
 
-| Scope | Minimum role | Why it is needed |
-| --- | --- | --- |
-| Each analyzed subscription | `Reader` | Lets the script enumerate VMs, VM Scale Sets, Batch accounts, Batch pools, Advisor recommendations, and Compute SKU availability through Azure Resource Graph and ARM read APIs. |
-| Management group containing the analyzed subscriptions | `Reader` | Optional convenience when you want the same read access inherited by many subscriptions. Use only if your governance model allows it. |
-| Individual resource group or resource | `Reader` | Works only for partial, resource-scoped visibility. Use this only when you intentionally want a limited report; subscription-level Reader is recommended for complete retirement and Advisor coverage. |
+Recommended assignment options:
 
-In simple terms: assign `Reader` at the **subscription** scope for each subscription included in
-`-SubscriptionIds`. If you pass multiple subscriptions, the signed-in identity needs Reader on all of
-them. If you omit `-SubscriptionIds`, the script scans the enabled subscriptions visible to the current
-Azure context, so the output is only as complete as the subscriptions the identity can read.
+| Option | Scope | Role / permission model | What you get |
+| --- | --- | --- | --- |
+| Easiest reliable minimum | Each analyzed subscription | Built-in `Reader` | Complete inventory, Advisor signals, VMSS/Batch sidecars and Compute SKU availability with the least setup effort. |
+| Multi-subscription convenience | Management group containing the analyzed subscriptions | Built-in `Reader` inherited by subscriptions | Same practical result as subscription-level Reader, but managed once at management-group scope. Use only if your governance model allows inheritance. |
+| Reduced-scope report | Selected resource groups or resources | Built-in `Reader` on those scopes | Partial visibility for VM/VMSS/Batch resources in that scope. Advisor and SKU availability may still require subscription-scope read access, so the report can be incomplete. |
+| Strict least privilege | Usually subscription scope for shared data plus narrower scopes where supported | Custom role with explicit read actions | Smallest permission surface, but more operational effort. Best for controlled environments where custom RBAC is standard. |
 
-Data-source notes:
+For normal use, assign `Reader` at the **subscription** scope for each subscription included in
+`-SubscriptionIds`. If you pass multiple subscriptions, the signed-in identity needs read access on all
+of them. If you omit `-SubscriptionIds`, the script scans the enabled subscriptions visible to the
+current Azure context, so the output is only as complete as the subscriptions the identity can read.
 
-- **VM inventory, VMSS inventory, Batch accounts and Batch pools:** require Azure read access on the
-  target resources. Subscription-level `Reader` is the safest minimal scope for complete inventory.
-- **Azure Advisor retirement signals:** require read access at the subscription scope to reliably see
-  subscription recommendations. If Advisor is unavailable or intentionally skipped with `-SkipAdvisor`,
-  the report can still use Microsoft Learn SKU-family retirement data, but it loses per-resource
-  Advisor confirmation.
-- **Compute Resource SKUs API:** uses ARM read access in one target subscription to understand regional
-  SKU availability and restrictions.
-- **Azure Retail Prices API and Microsoft Learn retirement data:** public sources; they do not require
+Strict least-privilege custom role baseline:
+
+```text
+Microsoft.Resources/subscriptions/read
+Microsoft.Resources/subscriptions/resourceGroups/read
+Microsoft.ResourceGraph/resources/read
+Microsoft.Advisor/recommendations/read
+Microsoft.Compute/skus/read
+Microsoft.Compute/virtualMachines/read
+Microsoft.Compute/virtualMachines/extensions/read
+Microsoft.Compute/virtualMachineScaleSets/read
+Microsoft.Batch/batchAccounts/read
+Microsoft.Batch/batchAccounts/pools/read
+```
+
+Important scope notes:
+
+- **VM inventory, VM extensions, VMSS inventory, Batch accounts and Batch pools** can be narrowed to
+  selected resource groups or resources if you intentionally want a limited report.
+- **Azure Advisor retirement signals** are subscription-level recommendations. To reliably include
+  Advisor-confirmed retirement rows, grant the identity permission to read Advisor recommendations at
+  subscription scope.
+- **Compute Resource SKUs API** is called through a subscription-level ARM endpoint
+  (`/subscriptions/{subscriptionId}/providers/Microsoft.Compute/skus`). It is used to understand regional
+  SKU availability and restrictions, so it is not tied to one specific VM resource.
+- **Azure Resource Graph** returns only resources the identity can read. Narrow scopes produce narrow
+  results; this is valid when intentional, but it is not a complete subscription report.
+- **Azure Retail Prices API and Microsoft Learn retirement data** are public sources; they do not require
   tenant-specific Azure RBAC.
 
 No elevated roles such as `Contributor`, `Owner`, `Virtual Machine Contributor`, `Cost Management
