@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<!-- saved from url=(0088)file:///C:/temp/repos/AzureSKUs-Report/out/20260713_103110/sku_modernization_report.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Azure SKU Modernization Report</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: Segoe UI, Arial, sans-serif; color: #1f2937; margin: 0; background: linear-gradient(180deg, #f8fafc 0%, #ffffff 220px); overflow-x: hidden; }
+main { width: 100%; margin: 0; padding: 24px 20px 30px; }
+h1 { font-size: 28px; margin: 0 0 4px; }
+h2 { font-size: 18px; margin: 18px 0 10px; }
+p { line-height: 1.45; margin: 0; }
+a { text-decoration: none; color: #464feb; }
+.meta { color: #6b7280; font-size: 12px; }
+.statusbar { margin: 14px 0 16px; border: 1px solid #dbe4ff; background: #eef2ff; color: #1e3a8a; border-radius: 10px; padding: 10px 12px; font-weight: 600; font-size: 13px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 14px 0 16px; }
+.kpi { border: 1px solid #e6e6e6; padding: 14px; border-radius: 10px; background: #ffffff; box-shadow: 0 1px 0 rgba(15,23,42,0.04); }
+.kpi-label { color: #6b7280; font-size: 12px; }
+.kpi-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+.timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin: 10px 0 14px; }
+.wave-chip { border-radius: 999px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; font-weight: 700; }
+.wave-chip-title { font-size: 12px; }
+.wave-chip-count { font-size: 14px; }
+.w0 { background: #fee2e2; border-color: #fecaca; color: #991b1b; }
+.w1 { background: #ffedd5; border-color: #fed7aa; color: #9a3412; }
+.w2 { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+.w3 { background: #dcfce7; border-color: #bbf7d0; color: #166534; }
+.w4 { background: #dbeafe; border-color: #bfdbfe; color: #1e40af; }
+.wave-card { border: 1px solid #e6e6e6; border-left-width: 6px; border-radius: 10px; background: #ffffff; margin: 10px 0; overflow: hidden; }
+.wave-card > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; background: #f8fafc; }
+.wave-card > summary::-webkit-details-marker { display: none; }
+.wave-head { font-weight: 700; font-size: 14px; }
+.wave-head-count { color: #475569; font-size: 12px; font-weight: 700; }
+.wave-card.w0 { border-left-color: #dc2626; }
+.wave-card.w1 { border-left-color: #ea580c; }
+.wave-card.w2 { border-left-color: #d97706; }
+.wave-card.w3 { border-left-color: #16a34a; }
+.wave-card.w4 { border-left-color: #2563eb; }
+.wave-note { color: #475569; font-size: 12px; padding: 0 14px 10px; }
+.wave-item { border-top: 1px solid #e6e6e6; padding: 12px 14px; }
+.wave-item-top { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 3px; }
+.wave-item-path { font-size: 13px; margin-bottom: 6px; }
+.wave-item-meta { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+.delta { font-weight: 700; font-size: 12px; border-radius: 999px; padding: 2px 8px; }
+.delta-up { background: #fee2e2; color: #991b1b; }
+.delta-down { background: #dcfce7; color: #166534; }
+.delta-flat { background: #e5e7eb; color: #374151; }
+.wave-item-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.pill { border-radius: 999px; font-size: 11px; font-weight: 700; padding: 2px 8px; }
+.pill-gen { background: #fee2e2; color: #991b1b; }
+.pill-sensitive { background: #e0f2fe; color: #075985; }
+.pill-family { background: #ede9fe; color: #5b21b6; }
+.pill-flag { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+.wave-item-rationale { color: #334155; font-size: 12px; margin: 3px 0 6px; }
+.mini > summary { cursor: pointer; font-size: 12px; color: #334155; }
+.mini ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: #475569; }
+.tag { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.tag-advisor { background: #fef3c7; color: #92400e; }
+.tag-learn { background: #e0f2fe; color: #075985; }
+.tag-gen { background: #fee2e2; color: #b91c1c; }
+.tag-os { background: #e5e7eb; color: #374151; }
+.tag-osflag { background: #fef3c7; color: #92400e; }
+.tag-preview { background: #dcfce7; color: #166534; vertical-align: middle; }
+.note { background: #f8fafc; border-left: 4px solid #64748b; padding: 12px 14px; margin: 12px 0; }
+.disclaimer { background: #fff7ed; border-left: 4px solid #ea580c; padding: 12px 14px; margin: 16px 0; font-size: 13px; }
+.coverage { background: #f0f9ff; border-left: 4px solid #0284c7; padding: 12px 16px; margin: 16px 0; font-size: 13px; }
+.coverage ul { margin: 8px 0 0; padding-left: 20px; }
+.accordion { border: 1px solid #e6e6e6; border-radius: 10px; background: #ffffff; margin: 12px 0; overflow: hidden; }
+.accordion > summary { cursor: pointer; list-style: none; padding: 12px 14px; font-weight: 700; background: #f8fafc; }
+.accordion > summary::-webkit-details-marker { display: none; }
+.accordion-body { padding: 12px 14px 14px; }
+.footer { color: #6b7280; font-size: 12px; margin-top: 32px; border-top: 1px solid #e6e6e6; padding-top: 16px; }
+table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 12px; }
+tr th, tr td { border: 1px solid #e6e6e6; vertical-align: top; }
+tr th { background-color: #f5f5f5; text-align: left; padding: 8px; }
+td { padding: 8px; }
+ul { margin-top: 8px; }
+.layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
+.sidebar { position: fixed; inset: 0 auto 0 0; width: 240px; overflow: auto; background: #0f172a; color: #f8fafc; padding: 24px 20px; }
+.sidebar h1 { font-size: 21px; line-height: 1.15; margin-bottom: 14px; }
+.sidebar .side-muted, .sidebar .side-item span { color: #cbd5e1; }
+.sidebar .side-item { border-top: 1px solid rgba(255,255,255,0.12); padding: 12px 0; font-size: 12px; }
+.sidebar .side-item strong { display: block; color: #ffffff; font-size: 15px; margin-top: 3px; }
+.freshness-badge { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 5px 9px; font-weight: 800; font-size: 11px; margin-top: 8px; }
+.freshness-ok { background: #dcfce7; color: #166534; }
+.freshness-warn { background: #fef3c7; color: #92400e; }
+.section-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.report-nav { display: grid; gap: 7px; margin: 16px 0 14px; }
+.report-nav label { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; padding: 9px 10px; color: #cbd5e1; background: rgba(255,255,255,0.04); cursor: pointer; font-size: 12px; font-weight: 800; }
+.report-nav label span { color: #94a3b8; font-size: 10px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
+.report-nav label:hover { background: rgba(255,255,255,0.09); color: #ffffff; }
+#view-overview:checked ~ .layout label[for='view-overview'],
+#view-engineer:checked ~ .layout label[for='view-engineer'],
+#view-project:checked ~ .layout label[for='view-project'],
+#view-finops:checked ~ .layout label[for='view-finops'],
+#view-coverage:checked ~ .layout label[for='view-coverage'] { background: #eff6ff; border-color: #93c5fd; color: #1e3a8a; }
+#view-overview:checked ~ .layout label[for='view-overview'] span,
+#view-engineer:checked ~ .layout label[for='view-engineer'] span,
+#view-project:checked ~ .layout label[for='view-project'] span,
+#view-finops:checked ~ .layout label[for='view-finops'] span,
+#view-coverage:checked ~ .layout label[for='view-coverage'] span { color: #2563eb; }
+.tab-panel { display: none; }
+#view-overview:checked ~ .layout .tab-overview,
+#view-engineer:checked ~ .layout .tab-engineer,
+#view-project:checked ~ .layout .tab-project,
+#view-finops:checked ~ .layout .tab-finops,
+#view-coverage:checked ~ .layout .tab-coverage { display: block; }
+.tab-heading { margin: 0 0 14px; }
+.tab-heading h2 { margin: 0 0 4px; font-size: 22px; }
+.tab-heading p { color: #475569; font-size: 13px; }
+.dashboard { margin-left: 240px; width: calc(100vw - 240px); padding: 22px clamp(16px, 2vw, 34px) 34px; max-width: none; }
+.exec-band { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; box-shadow: 0 10px 24px rgba(15,23,42,0.06); }
+.exec-grid { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
+.exec-grid .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0; }
+.monitoring-panel .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 10px 0; }
+.exec-narrative { color: #334155; font-size: 15px; line-height: 1.5; margin: 8px 0 12px; }
+.exec-bullets { margin: 10px 0 0; padding-left: 18px; color: #334155; }
+.exec-bullets li { margin: 4px 0; }
+.info-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 14px 0; }
+.info-card { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 12px; }
+.info-label { color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.info-value { font-size: 16px; font-weight: 800; margin-top: 5px; color: #0f172a; }
+.story-band { border: 1px solid #dbe4ff; border-radius: 14px; background: linear-gradient(135deg, #eef4ff 0%, #f8fafc 65%, #fff1f2 100%); padding: 18px; margin: 10px 0 16px; }
+.story-kicker { font-size: 11px; font-weight: 900; letter-spacing: .09em; text-transform: uppercase; color: #334155; }
+.story-title { font-size: 24px; line-height: 1.15; margin: 6px 0 8px; color: #0f172a; }
+.story-subtitle { color: #334155; font-size: 14px; margin-bottom: 10px; }
+.story-status { display: inline-flex; border: 1px solid #bfdbfe; border-radius: 999px; padding: 5px 10px; background: #eff6ff; color: #1e3a8a; font-weight: 800; font-size: 12px; }
+.decision-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+.decision-card { border-radius: 12px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
+.decision-tag { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
+.decision-value { font-size: 28px; font-weight: 900; margin-top: 5px; color: #0f172a; }
+.decision-title { font-size: 14px; font-weight: 800; color: #1e293b; margin-top: 4px; }
+.decision-note { font-size: 12px; color: #334155; margin-top: 6px; }
+.matrix-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.matrix-cell { border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
+.matrix-axis { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; color: #64748b; }
+.matrix-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 5px; }
+.matrix-title { font-size: 14px; font-weight: 800; color: #0f172a; }
+.matrix-count { font-size: 20px; font-weight: 900; }
+.matrix-note { color: #334155; font-size: 12px; margin-top: 7px; }
+.cell-high-low { border-left: 5px solid #dc2626; }
+.cell-high-high { border-left: 5px solid #ea580c; }
+.cell-low-high { border-left: 5px solid #2563eb; }
+.cell-low-low { border-left: 5px solid #16a34a; }
+.scenario-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.scenario-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #ffffff; }
+.scenario-card h3 { margin: 0; font-size: 14px; }
+.scenario-count { font-size: 22px; font-weight: 900; margin-top: 6px; color: #0f172a; }
+.scenario-card p { margin-top: 6px; font-size: 12px; color: #334155; }
+.countdown-list { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 8px; }
+.countdown-list li { display: grid; gap: 3px; }
+.deadline-date { display: inline-block; width: fit-content; border-radius: 999px; padding: 2px 8px; background: #fee2e2; color: #991b1b; font-size: 11px; font-weight: 800; }
+.confidence-line { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.confidence-chip { border-radius: 999px; border: 1px solid #cbd5e1; padding: 3px 8px; font-size: 11px; font-weight: 800; color: #334155; background: #ffffff; }
+.legend-body { padding: 14px; display: grid; gap: 12px; }
+.legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.legend-box { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #ffffff; }
+.legend-box h3 { margin: 0 0 7px; font-size: 13px; color: #0f172a; }
+.legend-box dl { margin: 0; display: grid; gap: 7px; }
+.legend-box dt { font-weight: 900; font-size: 12px; color: #1e293b; }
+.legend-box dd { margin: 2px 0 0; color: #475569; font-size: 12px; line-height: 1.35; }
+.legend-inline { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend-inline span { border-radius: 999px; border: 1px solid #cbd5e1; padding: 3px 8px; font-size: 11px; font-weight: 800; background: #f8fafc; color: #334155; }
+.info-dot { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; margin-left: 6px; border-radius: 999px; border: 1px solid #93c5fd; background: #eff6ff; color: #1d4ed8; font-size: 11px; font-weight: 900; vertical-align: middle; cursor: help; }
+.info-dot:hover { background: #dbeafe; border-color: #60a5fa; }
+.help-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.help-tab { width: fit-content; margin-top: 14px; border-radius: 999px; background: #1d4ed8; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 12px; font-size: 12px; font-weight: 900; letter-spacing: .02em; box-shadow: 0 10px 20px rgba(15,23,42,0.22); cursor: pointer; border: 2px solid rgba(255,255,255,0.82); }
+.help-tab:before { content: 'i'; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 11px; font-weight: 900; }
+.help-tab:hover { background: #1e40af; }
+.help-overlay { display: none; position: fixed; inset: 0; z-index: 120; background: rgba(15,23,42,0.52); padding: 34px; overflow: auto; }
+.help-toggle:checked ~ .help-overlay { display: block; }
+.help-layer { max-width: 1040px; margin: 0 auto; background: #ffffff; border-radius: 14px; border: 1px solid #dbe4ff; box-shadow: 0 24px 60px rgba(15,23,42,0.28); overflow: hidden; }
+.help-layer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+.help-layer-head h2 { margin: 0; }
+.help-close { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; border-radius: 999px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; cursor: pointer; font-weight: 900; }
+.help-close:hover { background: #eff6ff; border-color: #93c5fd; }
+.help-layer-body { padding: 16px; }
+.content-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 18px; align-items: start; margin-top: 18px; }
+.panel { border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; padding: 16px; box-shadow: 0 1px 0 rgba(15,23,42,0.04); }
+.preview-panel { border-left: 6px solid #16a34a; background: #fbfffc; }
+.finops-panel { border-left: 6px solid #0ea5e9; background: #f0f9ff; }
+.preview-kpis { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); max-width: none; }
+.monitoring-panel { border-left: 6px solid #475569; background: #f8fafc; }
+.monitoring-panel h2 { margin-top: 0; }
+.outside-count { display: inline-block; border: 1px solid #cbd5e1; background: #ffffff; color: #334155; border-radius: 999px; padding: 4px 9px; font-size: 11px; font-weight: 800; margin: 6px 0 10px; }
+.timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin: 10px 0 14px; }
+.timeline-card { border-radius: 10px; padding: 12px; border: 1px solid transparent; min-height: 108px; }
+.timeline-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.wave-code { font-weight: 900; letter-spacing: .03em; }
+.urgency { font-size: 11px; font-weight: 800; }
+.timeline-count { font-size: 30px; font-weight: 900; line-height: 1; margin-top: 14px; }
+.timeline-label { font-size: 12px; line-height: 1.25; margin-top: 8px; }
+.w0 { background: #fee2e2; border-color: #fecaca; color: #991b1b; }
+.w1 { background: #ffedd5; border-color: #fed7aa; color: #9a3412; }
+.w2 { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+.w3 { background: #dbeafe; border-color: #bfdbfe; color: #1e40af; }
+.w4 { background: #dcfce7; border-color: #bbf7d0; color: #166534; }
+.wave-badge { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 900; white-space: nowrap; }
+.summary-split { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 14px; align-items: center; }
+.donut { width: 82px; height: 82px; border-radius: 50%; background: conic-gradient(#2563eb 0 50%, #b91c1c 50% 100%); position: relative; }
+.donut:after { content: ''; position: absolute; inset: 18px; border-radius: 50%; background: #ffffff; }
+.legend { display: grid; gap: 6px; font-size: 13px; }
+.legend-row { display: flex; justify-content: space-between; gap: 10px; }
+.legend-key { display: inline-flex; align-items: center; gap: 7px; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.swatch-blue { background: #2563eb; }
+.swatch-red { background: #b91c1c; }
+.money-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.money-cell { border: 1px solid #e2e8f0; border-radius: 9px; padding: 10px; background: #ffffff; }
+.money-label { color: #64748b; font-size: 11px; font-weight: 800; }
+.money-value { font-weight: 900; margin-top: 4px; }
+.table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap table { min-width: 920px; }
+.monitor-table { margin-top: 10px; }
+@media print { body { background: #ffffff; } .help-tab, .help-overlay, .help-toggle, .section-toggle, .report-nav { display: none !important; } .tab-panel { display: block !important; } .layout { display: block; } .sidebar { position: static; width: auto; color: #0f172a; background: #ffffff; border-bottom: 1px solid #cbd5e1; } .sidebar .side-muted, .sidebar .side-item span { color: #334155; } .sidebar .side-item strong { color: #0f172a; } .dashboard { margin-left: 0; padding: 12px 0; max-width: none; } .exec-grid, .content-grid, .info-strip, .kpis, .timeline, .money-grid, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { display: block; } .panel, .exec-band, .timeline-card, .kpi, .info-card, .story-band, .tab-panel { break-inside: avoid; box-shadow: none; margin: 8px 0; } details, details:not([open]) > * { display: block !important; } summary { display: block; } }
+@media (max-width: 1120px) { .exec-grid { grid-template-columns: 1fr; } }
+@media (max-width: 920px) { .sidebar { width: 220px; } .dashboard { margin-left: 220px; width: calc(100vw - 220px); } }
+@media (max-width: 760px) { body { overflow-x: auto; } .layout { display: block; } .sidebar { position: static; width: auto; } .report-nav { grid-template-columns: 1fr 1fr; } .dashboard { margin-left: 0; width: 100%; padding: 14px; } .help-overlay { padding: 14px; } .exec-grid, .content-grid, .info-strip, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { grid-template-columns: 1fr; } .kpis { grid-template-columns: 1fr; } .timeline { grid-template-columns: 1fr; } .wave-item-top { flex-direction: column; align-items: flex-start; } .story-title { font-size: 20px; } table { font-size: 11px; } }
+</style>
+</head>
+<body>
+<input class="section-toggle" type="radio" name="report-view" id="view-overview" checked="">
+<input class="section-toggle" type="radio" name="report-view" id="view-engineer">
+<input class="section-toggle" type="radio" name="report-view" id="view-project">
+<input class="section-toggle" type="radio" name="report-view" id="view-finops">
+<input class="section-toggle" type="radio" name="report-view" id="view-coverage">
+<input class="help-toggle" type="checkbox" id="report-help-toggle">
+<div class="help-overlay">
+<div class="help-layer" role="dialog" aria-modal="true" aria-labelledby="report-help-title">
+<div class="help-layer-head"><h2 id="report-help-title">Report guide - concepts, fields and sections</h2><label class="help-close" for="report-help-toggle" title="Close report guide" aria-label="Close report guide">X</label></div>
+<div class="help-layer-body">
+<div class="legend-body">
+<div class="legend-grid">
+<section class="legend-box">
+<h3>Core concepts</h3>
+<dl>
+<div><dt>Compute retirement path</dt><dd>Standalone VMs plus Public Preview Batch/VMSS sidecars whose VM size has a retirement signal. Remediation waves still cover standalone VMs only.</dd></div>
+<div><dt>Advisor-confirmed</dt><dd>Per-resource Advisor signal. It is stronger than a generic family exposure because Azure identified the specific VM.</dd></div>
+<div><dt>SKU-family exposure</dt><dd>The current VM size belongs to a retiring SKU family from Microsoft Learn, even when Advisor did not emit a per-resource row.</dd></div>
+<div><dt>Monitoring lifecycle</dt><dd>Dependency Agent / VM Insights Map lifecycle findings. These are intentionally separate and never counted as compute SKU retirements.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Wave model</h3>
+<dl>
+<div><dt>W0 Time-critical</dt><dd>Retirement risk is Critical/High. Calendar pressure wins over all other sequencing rules.</dd></div>
+<div><dt>W1 Advisor + sensitive</dt><dd>Advisor-confirmed VM on a sensitive workload. Use tighter change governance and validation.</dd></div>
+<div><dt>W2 Sensitive validation</dt><dd>Sensitive workload with same-generation resize. Lower technical change, but still validate workload behavior.</dd></div>
+<div><dt>W3 Architecture</dt><dd>Cross-family Gen1→Gen2 path. Validate image, drivers, boot/runtime assumptions, capacity and performance profile.</dd></div>
+<div><dt>W4 Low complexity</dt><dd>Standard same-generation resize lane. Best candidate for runbook-driven batch remediation.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Decision sections</h3>
+<dl>
+<div><dt>Decision Room</dt><dd>Management view: what to act on now, what needs validation, and what can move as quick wins.</dd></div>
+<div><dt>Risk vs Effort Matrix</dt><dd>Translates waves into execution lanes so risk and engineering effort are visible at a glance.</dd></div>
+<div><dt>Execution Scenarios</dt><dd>Conservative, balanced and accelerated views over the same facts. They do not change counts or recommendations.</dd></div>
+<div><dt>If We Do Nothing</dt><dd>Earliest dated retirement rows, useful as the escalation queue for planning.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>Detail table fields</h3>
+<dl>
+<div><dt>Recommended SKU</dt><dd>Deterministic candidate target selected by the script; validate compatibility, quota, capacity and business constraints before change.</dd></div>
+<div><dt>Retail cost delta / month</dt><dd>PAYG/list-price estimate only. It excludes real negotiated pricing, RI/Savings Plan effects and workload-specific commercial adjustments.</dd></div>
+<div><dt>Validation</dt><dd>Checks and caveats that should be reviewed before migration, including generation change, sensitive workload and RI/SP flags.</dd></div>
+<div><dt>Next step</dt><dd>Suggested operational action for the row. It is guidance, not an approval to migrate.</dd></div>
+</dl>
+</section>
+</div>
+<div class="legend-inline"><span>Data is deterministic</span><span>No AI-generated numbers</span><span>Live-source provenance shown in sidebar</span><span>Costs are indicative only</span><span>Validate in Advisor, Service Health and Retirement Workbook</span></div>
+</div>
+</div>
+</div>
+</div>
+<div class="layout">
+<aside class="sidebar">
+<h1>Azure SKU Modernization Report</h1>
+<p class="side-muted">Not an official Microsoft tool. Validate all signals in Azure Advisor, Service Health and the Azure Retirement Workbook before migration decisions.</p>
+<div class="freshness-badge freshness-ok">Data Freshness: Fresh · Live sources OK · As-of 2026-07-13</div>
+<nav class="report-nav" aria-label="Report sections">
+<label for="view-overview">Executive Overview <span>CXO</span></label>
+<label for="view-engineer">CSA / Engineer <span>Detail</span></label>
+<label for="view-project">Project Plan <span>PM</span></label>
+<label for="view-finops">FinOps <span>Cost</span></label>
+<label for="view-coverage">Coverage <span>Evidence</span></label>
+</nav>
+<div class="side-item"><span>Generated (UTC)</span><strong>2026-07-13 09:31:50</strong></div>
+<div class="side-item"><span>Live sources</span><strong>Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook)</strong></div>
+<div class="side-item"><span>Tenants / subscriptions</span><strong>1 / 2</strong></div>
+<div class="side-item"><span>As-of</span><strong>2026-07-13</strong></div>
+<label class="help-tab" for="report-help-toggle" title="Open report guide" aria-label="Open report guide">Legend</label>
+</aside>
+<main class="dashboard">
+<div class="statusbar">Sample report: resource names have been anonymized for public documentation. Counts, sections and layout are representative of the generated output.</div>
+<div class="tab-panel tab-overview">
+<section class="exec-band">
+<div class="exec-grid">
+<div>
+<h2>Executive Summary<span class="info-dot" title="Fact-derived overview of retirement exposure, source split, generation split and retail delta.">i</span></h2>
+<p class="exec-narrative">This run identifies 10 compute resource(s) on a VM-size retirement path: 9 standalone VM(s), 1 VM Scale Set(s), and 0 Batch pool(s). Standalone VM remediation waves cover 9 VM(s): 1 Advisor-confirmed and 8 SKU-family exposure. Monthly retail/list-price delta for standalone VM candidates is +39.50; RI cutoff planning flags 11 resource(s) in affected families but does not query actual tenant reservations.</p>
+<ul class="exec-bullets">
+<li><strong>Compute retirement path:</strong> 10 resource(s) = 9 standalone VM(s) + 1 VMSS + 0 Batch pool(s).</li>
+<li><strong>Standalone VM source split:</strong> 1 Advisor-confirmed + 8 SKU-family exposure; VM remediation waves cover these 9 VM(s).</li>
+<li><strong>Retail delta/month:</strong> +39.50 / month. PAYG/list-price signal only; not a validated saving.</li>
+<li><strong>Generation split:</strong> 4 same-generation resize(s) · 5 Gen1→Gen2 change(s).</li>
+<li><strong>RI cutoff planning:</strong> 11 resource(s) in affected families; actual RI inventory is not queried and this is not a shutdown signal.</li>
+<li><strong>Monitoring lifecycle:</strong> 8 VM(s) tracked separately, outside compute retirement count.</li>
+</ul>
+</div>
+<div class="kpis">
+<div class="kpi"><div class="kpi-label">Compute retirement path<span class="info-dot" title="Standalone VM retirement path plus Public Preview VMSS and Batch sidecar rows. Monitoring lifecycle rows are excluded.">i</span></div><div class="kpi-value">10</div></div>
+<div class="kpi"><div class="kpi-label">Standalone VMs<span class="info-dot" title="VMs that drive the main detail table, remediation waves and CSV/backlog outputs.">i</span></div><div class="kpi-value">9</div></div>
+<div class="kpi"><div class="kpi-label">VMSS / Batch preview<span class="info-dot" title="Public Preview sidecar resources on a VM-size retirement path; not included in VM remediation waves.">i</span></div><div class="kpi-value">1 / 0</div></div>
+<div class="kpi"><div class="kpi-label">Retail delta / month<span class="info-dot" title="PAYG/list-price estimate only; not negotiated price, RI/SP impact or validated saving.">i</span></div><div class="kpi-value">+39.50 / month</div></div>
+</div>
+</div>
+</section>
+
+<section class="info-strip">
+<div class="info-card"><div class="info-label">Nearest retirement deadline</div><div class="info-value">2028-05-01</div><div class="meta">VM: test</div></div>
+<div class="info-card"><div class="info-label">SKU change vs generation change</div><div class="info-value">4 same-gen · 5 Gen1→Gen2</div><div class="meta">Counts read from report facts.</div></div>
+<div class="info-card"><div class="info-label">RI / Savings Plan retirement flag</div><div class="info-value">0 flagged</div><div class="meta">SKU offer signal only; not actual tenant commitment inventory.</div></div>
+<div class="info-card"><div class="info-label">RI cutoff planning</div><div class="info-value">11 in cutoff families</div><div class="meta">No active RI is inferred; verify reservations separately.</div></div>
+</section>
+
+<section class="story-band">
+<div class="story-kicker">Decision Room<span class="info-dot" title="Management view that groups deterministic waves into immediate action, validation and quick-win lanes.">i</span></div>
+<div class="story-title">90-day modernization playbook</div>
+<p class="story-subtitle">Use the deterministic wave output to drive sequencing decisions: what to execute now, what to validate, and what can move as quick wins.</p>
+<span class="story-status">10/14 compute resources on retirement path | VM 9, VMSS 1, Batch 0 | +39.50/mo | nearest deadline 2028-05-01</span>
+
+<div class="decision-grid">
+<article class="decision-card">
+<div class="decision-tag">This sprint</div>
+<div class="decision-value">2</div>
+<div class="decision-title">Act now (W0 + W1)</div>
+<div class="decision-note">Time-critical or Advisor-confirmed sensitive workloads that should be prioritized in immediate change windows.</div>
+</article>
+<article class="decision-card">
+<div class="decision-tag">Next wave</div>
+<div class="decision-value">5</div>
+<div class="decision-title">Plan with validation (W2 + W3)</div>
+<div class="decision-note">Workloads with moderate/high technical validation effort that need architecture and application checks before cutover.</div>
+</article>
+<article class="decision-card">
+<div class="decision-tag">Quick wins</div>
+<div class="decision-value">2</div>
+<div class="decision-title">Low-complexity moves (W4)</div>
+<div class="decision-note">Candidate moves for accelerated execution batches, often suitable for standard runbooks.</div>
+</article>
+<article class="decision-card">
+<div class="decision-tag">Preview sidecars</div>
+<div class="decision-value">1</div>
+<div class="decision-title">VMSS + Batch</div>
+<div class="decision-note">Separate detail tables below; keep them visible in planning but outside standalone VM wave counts.</div>
+</article>
+</div>
+
+<div class="confidence-line">
+<span class="confidence-chip">Advisor-confirmed share: 11% of retirement-path VMs</span>
+<span class="confidence-chip">Live source status: live sources ok</span>
+<span class="confidence-chip">Compute total: 10 = VM 9 + VMSS 1 + Batch 0</span>
+<span class="confidence-chip">RI cutoff planning: 11 resource(s); actual reservations not queried</span>
+<span class="confidence-chip">Monitoring kept separate: 8 VM(s)</span>
+</div>
+</section>
+</div>
+
+<div class="tab-panel tab-project">
+<div class="tab-heading"><h2>Project Plan</h2><p>Delivery-oriented sequencing, risk/effort lanes and deadline pressure for standalone VM remediation waves.</p></div>
+
+<section class="panel">
+<h2>Summary by Change Type</h2>
+<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>4</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1→Gen2</span><strong>5</strong></div></div></div>
+</section>
+
+<div class="content-grid">
+<section class="panel">
+<h2>Risk vs Effort Matrix<span class="info-dot" title="Maps waves into execution lanes using existing wave counts; it does not recompute or reclassify rows.">i</span></h2>
+<div class="matrix-grid">
+<article class="matrix-cell cell-high-low">
+<div class="matrix-axis">High risk · Lower effort</div>
+<div class="matrix-head"><span class="matrix-title">Immediate execution lane</span><span class="matrix-count">1</span></div>
+<p class="matrix-note">W0 workloads: retirement timeline risk dominates, so execution urgency is highest.</p>
+</article>
+<article class="matrix-cell cell-high-high">
+<div class="matrix-axis">High risk · Higher effort</div>
+<div class="matrix-head"><span class="matrix-title">Governed execution lane</span><span class="matrix-count">4</span></div>
+<p class="matrix-note">W1 and W3 workloads: sensitive or cross-family Gen1→Gen2 changes requiring stronger governance and validation.</p>
+</article>
+<article class="matrix-cell cell-low-high">
+<div class="matrix-axis">Lower risk · Higher effort</div>
+<div class="matrix-head"><span class="matrix-title">Engineering validation lane</span><span class="matrix-count">2</span></div>
+<p class="matrix-note">W2 workloads: sensitive but same-generation; schedule non-production validation before scale rollout.</p>
+</article>
+<article class="matrix-cell cell-low-low">
+<div class="matrix-axis">Lower risk · Lower effort</div>
+<div class="matrix-head"><span class="matrix-title">Quick-win lane</span><span class="matrix-count">2</span></div>
+<p class="matrix-note">W4 workloads: standard, low-complexity moves suitable for bulk remediation windows.</p>
+</article>
+</div>
+</section>
+
+<section class="panel">
+<h2>Execution Scenarios<span class="info-dot" title="Alternative rollout views over the same facts: conservative, balanced and accelerated.">i</span></h2>
+<div class="scenario-grid">
+<article class="scenario-card">
+<h3>Conservative</h3>
+<div class="scenario-count">2</div>
+<p>Focus only on W0 + W1 to reduce near-term retirement exposure with controlled blast radius.</p>
+</article>
+<article class="scenario-card">
+<h3>Balanced</h3>
+<div class="scenario-count">4</div>
+<p>Execute W0 + W1 and start W2 in parallel to reduce backlog while keeping architectural risk bounded.</p>
+</article>
+<article class="scenario-card">
+<h3>Accelerated</h3>
+<div class="scenario-count">9</div>
+<p>Run all waves with strict readiness gates and dedicated architecture validation for W3.</p>
+</article>
+</div>
+</section>
+</div>
+
+<section class="panel">
+<h2>If We Do Nothing<span class="info-dot" title="Earliest dated retirement rows in scope, useful for escalation and planning.">i</span></h2>
+<p class="meta">Top dated retirements in scope; use this list as the minimum escalation queue for operational planning.</p>
+<ol class="countdown-list"><li><span class="deadline-date">2028-05-01</span><strong>demo-batch-pool-01</strong><span>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</span></li><li><span class="deadline-date">2028-11-15</span><strong>demo-vm-dc-01</strong><span>Open Advisor recommendation, confirm affected resource and plan remediation.</span></li><li><span class="deadline-date">2028-11-15</span><strong>demo-vm-client-01</strong><span>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</span></li><li><span class="deadline-date">2028-11-15</span><strong>demo-vm-app-01</strong><span>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</span></li></ol>
+</section>
+
+<section class="panel">
+<h2>Remediation Plan (waves)</h2>
+<div class="timeline"><article class="timeline-card w0"><div class="timeline-top"><span class="wave-code">W0</span><span class="urgency">Time-critical</span></div><div class="timeline-count">1</div><div class="timeline-label">Wave 0 - Urgent retirement deadline</div></article><article class="timeline-card w1"><div class="timeline-top"><span class="wave-code">W1</span><span class="urgency">Advisor + sensitive</span></div><div class="timeline-count">1</div><div class="timeline-label">Wave 1 - Advisor-confirmed sensitive workloads</div></article><article class="timeline-card w2"><div class="timeline-top"><span class="wave-code">W2</span><span class="urgency">Sensitive validation</span></div><div class="timeline-count">2</div><div class="timeline-label">Wave 2 - Sensitive workload, same-generation resize</div></article><article class="timeline-card w3"><div class="timeline-top"><span class="wave-code">W3</span><span class="urgency">Architecture</span></div><div class="timeline-count">3</div><div class="timeline-label">Wave 3 - Cross-family Gen1-&gt;Gen2 (needs architecture validation)</div></article><article class="timeline-card w4"><div class="timeline-top"><span class="wave-code">W4</span><span class="urgency">Low complexity</span></div><div class="timeline-count">2</div><div class="timeline-label">Wave 4 - Low-complexity same-generation resize</div></article></div>
+<details class="wave-card w0" open=""><summary><span class="wave-head"><span class="wave-code">W0</span> Wave 0 - Urgent retirement deadline</span><span class="wave-head-count">1 VM · Time-critical</span></summary><p class="wave-note">Time-critical retirement path; schedule first.</p><article class="wave-item"><div class="wave-item-top"><strong>demo-batch-pool-01</strong><span class="meta">italynorth</span></div><div class="wave-item-path">Standard_DS2_v2 → Standard_D2ads_v7</div><div class="wave-item-meta"><span class="delta delta-down">-1.46/mo</span><span class="meta">retire date: 2028-05-01</span></div><div class="wave-item-badges"><span class="pill pill-gen">Gen1→Gen2</span><span class="pill pill-family">Cross-family</span></div><div class="wave-item-rationale">Heuristic: cross-family migration (requires architecture validation) Gen1-&gt;Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first.</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Gen1-&gt;Gen2: confirm the OS image is Gen2 (UEFI); validate boot, drivers and extensions.</li><li>Cross-family: validate CPU architecture / performance profile (sustained vs burstable) and application compatibility.</li></ul></details></article></details><details class="wave-card w1" open=""><summary><span class="wave-head"><span class="wave-code">W1</span> Wave 1 - Advisor-confirmed sensitive workloads</span><span class="wave-head-count">1 VM · Advisor + sensitive</span></summary><p class="wave-note">Per-resource Advisor signals on delicate workloads.</p><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-dc-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_F2 → Standard_F2als_v7</div><div class="wave-item-meta"><span class="delta delta-up">+19.71/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-gen">Gen1→Gen2</span><span class="pill pill-sensitive">Sensitive</span></div><div class="wave-item-rationale">Same-shape refresh: same vCPU/RAM profile but newer generation Gen1-&gt;Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first.</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Gen1-&gt;Gen2: confirm the OS image is Gen2 (UEFI); validate boot, drivers and extensions.</li><li>Sensitive workload (Infrastructure-DomainController): test in a non-production window (e.g. authentication / replication / directory sync) before cutover.</li></ul></details></article></details><details class="wave-card w2"><summary><span class="wave-head"><span class="wave-code">W2</span> Wave 2 - Sensitive workload, same-generation resize</span><span class="wave-head-count">2 VMs · Sensitive validation</span></summary><p class="wave-note">Lower technical change, but validation is still required for sensitive workloads.</p><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-sync-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_B2ms → Standard_B2as_v2</div><div class="wave-item-meta"><span class="delta delta-down">-5.69/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-sensitive">Sensitive</span></div><div class="wave-item-rationale">Rule-based: burstable continuity (same CPU credit model)</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Sensitive workload (Identity-DirectorySync): test in a non-production window (e.g. authentication / replication / directory sync) before cutover.</li></ul></details></article><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-auth-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_B4ms → Standard_B4as_v2</div><div class="wave-item-meta"><span class="delta delta-down">-12.41/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-sensitive">Sensitive</span></div><div class="wave-item-rationale">Rule-based: burstable continuity (same CPU credit model)</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Sensitive workload (Identity-ADFS): test in a non-production window (e.g. authentication / replication / directory sync) before cutover.</li></ul></details></article></details><details class="wave-card w3"><summary><span class="wave-head"><span class="wave-code">W3</span> Wave 3 - Cross-family Gen1-&gt;Gen2 (needs architecture validation)</span><span class="wave-head-count">3 VMs · Architecture</span></summary><p class="wave-note">Highest validation effort: class change plus generation boundary.</p><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-app-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_A1_v2 → Standard_F1als_v7</div><div class="wave-item-meta"><span class="delta delta-up">+21.39/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-gen">Gen1→Gen2</span><span class="pill pill-family">Cross-family</span><span class="pill pill-flag">class change (+71.46%)</span></div><div class="wave-item-rationale">Heuristic: cross-family migration (requires architecture validation) Gen1-&gt;Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first. The +71.46% reflects a compute-class change (e.g. burstable/basic -&gt; compute-optimized), not a pure price rise: validate the workload truly needs sustained CPU; if it is bursty, a B-series target may be cheaper.</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Gen1-&gt;Gen2: confirm the OS image is Gen2 (UEFI); validate boot, drivers and extensions.</li><li>Cross-family: validate CPU architecture / performance profile (sustained vs burstable) and application compatibility.</li></ul></details></article><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-app-02</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_A1_v2 → Standard_F1als_v7</div><div class="wave-item-meta"><span class="delta delta-up">+21.39/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-gen">Gen1→Gen2</span><span class="pill pill-family">Cross-family</span><span class="pill pill-flag">class change (+71.46%)</span></div><div class="wave-item-rationale">Heuristic: cross-family migration (requires architecture validation) Gen1-&gt;Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first. The +71.46% reflects a compute-class change (e.g. burstable/basic -&gt; compute-optimized), not a pure price rise: validate the workload truly needs sustained CPU; if it is bursty, a B-series target may be cheaper.</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Gen1-&gt;Gen2: confirm the OS image is Gen2 (UEFI); validate boot, drivers and extensions.</li><li>Cross-family: validate CPU architecture / performance profile (sustained vs burstable) and application compatibility.</li></ul></details></article><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-web-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_A1_v2 → Standard_F1als_v7</div><div class="wave-item-meta"><span class="delta delta-up">+21.39/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"><span class="pill pill-gen">Gen1→Gen2</span><span class="pill pill-family">Cross-family</span><span class="pill pill-flag">class change (+71.46%)</span></div><div class="wave-item-rationale">Heuristic: cross-family migration (requires architecture validation) Gen1-&gt;Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first. The +71.46% reflects a compute-class change (e.g. burstable/basic -&gt; compute-optimized), not a pure price rise: validate the workload truly needs sustained CPU; if it is bursty, a B-series target may be cheaper.</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li><li>Gen1-&gt;Gen2: confirm the OS image is Gen2 (UEFI); validate boot, drivers and extensions.</li><li>Cross-family: validate CPU architecture / performance profile (sustained vs burstable) and application compatibility.</li></ul></details></article></details><details class="wave-card w4"><summary><span class="wave-head"><span class="wave-code">W4</span> Wave 4 - Low-complexity same-generation resize</span><span class="wave-head-count">2 VMs · Low complexity</span></summary><p class="wave-note">Low-complexity quick wins, often cost-negative.</p><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-client-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_B4ms → Standard_B4as_v2</div><div class="wave-item-meta"><span class="delta delta-down">-12.41/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"></div><div class="wave-item-rationale">Rule-based: burstable continuity (same CPU credit model)</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li></ul></details></article><article class="wave-item"><div class="wave-item-top"><strong>demo-vm-win-01</strong><span class="meta">uksouth</span></div><div class="wave-item-path">Standard_B4ms → Standard_B4as_v2</div><div class="wave-item-meta"><span class="delta delta-down">-12.41/mo</span><span class="meta">retire date: 2028-11-15</span></div><div class="wave-item-badges"></div><div class="wave-item-rationale">Rule-based: burstable continuity (same CPU credit model)</div><details class="mini"><summary>Checklist</summary><ul><li>Verify regional quota / capacity for the target SKU before scheduling.</li></ul></details></article></details>
+</section>
+</div>
+
+<div class="tab-panel tab-engineer">
+<div class="tab-heading"><h2>CSA / Engineer</h2><p>Implementation detail for standalone VMs plus Public Preview VMSS and Batch sidecars.</p></div>
+
+<section class="panel">
+<h2>CSA / Engineer Detail<span class="info-dot" title="Per-VM implementation view: wave, source, OS pricing basis, target SKU, validation caveats and next step.">i</span></h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU</th><th>Validation</th><th>Next step</th></tr></thead>
+<tbody><tr><td><span class="wave-badge w0">W0 · Time-critical</span></td><td><strong>demo-batch-pool-01</strong><br><span class="meta">italynorth</span></td><td>Standard_DS2_v2</td><td><span class="tag tag-os">Linux</span><br><span class="meta">priced on Linux meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-05-01</span></td><td>Standard_D2ads_v7 <span class="tag tag-gen">Gen1→Gen2</span><br><span class="meta">Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1-&gt;Gen2 conversion) and validate boot, drivers and extensions before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w1">W1 · Advisor + sensitive</span></td><td><strong>demo-vm-dc-01</strong><br><span class="meta">uksouth</span></td><td>Standard_F2</td><td><span class="tag tag-os">Windows</span><br><span class="meta">priced on Windows meter</span></td><td>Advisor retirement signal: per-resource confirmed<br><span class="tag tag-advisor">Advisor (per-resource, confirmed)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_F2als_v7 <span class="tag tag-gen">Gen1→Gen2</span><br><span class="meta">Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1-&gt;Gen2 conversion) and validate boot, drivers and extensions before migrating. Sensitive workload (Infrastructure-DomainController): change is delicate - validate carefully and test in a non-production window before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Open Advisor recommendation, confirm affected resource and plan remediation.</td></tr><tr><td><span class="wave-badge w2">W2 · Sensitive validation</span></td><td><strong>demo-vm-sync-01</strong><br><span class="meta">uksouth</span></td><td>Standard_B2ms</td><td><span class="tag tag-os">Windows</span><br><span class="meta">priced on Windows meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_B2as_v2<br><span class="meta">Sensitive workload (Identity-DirectorySync): change is delicate - validate carefully and test in a non-production window before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w2">W2 · Sensitive validation</span></td><td><strong>demo-vm-auth-01</strong><br><span class="meta">uksouth</span></td><td>Standard_B4ms</td><td><span class="tag tag-os">Windows</span><br><span class="meta">priced on Windows meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_B4as_v2<br><span class="meta">Sensitive workload (Identity-ADFS): change is delicate - validate carefully and test in a non-production window before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w3">W3 · Architecture</span></td><td><strong>demo-vm-app-01</strong><br><span class="meta">uksouth</span></td><td>Standard_A1_v2</td><td><span class="tag tag-os">Linux</span><br><span class="meta">priced on Linux meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_F1als_v7 <span class="tag tag-gen">Gen1→Gen2</span><br><span class="meta">Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1-&gt;Gen2 conversion) and validate boot, drivers and extensions before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w3">W3 · Architecture</span></td><td><strong>demo-vm-app-02</strong><br><span class="meta">uksouth</span></td><td>Standard_A1_v2</td><td><span class="tag tag-os">Linux</span><br><span class="meta">priced on Linux meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_F1als_v7 <span class="tag tag-gen">Gen1→Gen2</span><br><span class="meta">Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1-&gt;Gen2 conversion) and validate boot, drivers and extensions before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w3">W3 · Architecture</span></td><td><strong>demo-vm-web-01</strong><br><span class="meta">uksouth</span></td><td>Standard_A1_v2</td><td><span class="tag tag-os">Linux</span><br><span class="meta">priced on Linux meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_F1als_v7 <span class="tag tag-gen">Gen1→Gen2</span><br><span class="meta">Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1-&gt;Gen2 conversion) and validate boot, drivers and extensions before migrating.</span></td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w4">W4 · Low complexity</span></td><td><strong>demo-vm-client-01</strong><br><span class="meta">uksouth</span></td><td>Standard_B4ms</td><td><span class="tag tag-os">Windows</span><br><span class="meta">priced on Windows meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_B4as_v2</td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr><tr><td><span class="wave-badge w4">W4 · Low complexity</span></td><td><strong>demo-vm-win-01</strong><br><span class="meta">uksouth</span></td><td>Standard_B4ms</td><td><span class="tag tag-os">Windows</span><br><span class="meta">priced on Windows meter</span></td><td>Microsoft Learn SKU-family retirement: verify VM scope in Workbook<br><span class="tag tag-learn">Learn (SKU-family, verify in Workbook)</span><br><span class="meta">Date: 2028-11-15</span></td><td>Standard_B4as_v2</td><td>Retail/list price delta calculated from cached Azure Retail Prices (730h/month). Not a validated saving.</td><td>Validate affected VM in Azure Retirement Workbook, then schedule SKU migration.</td></tr></tbody>
+</table>
+</div>
+</section>
+
+<section class="panel preview-panel">
+<h2>Preview Sidecar Coverage <span class="tag tag-preview">Public Preview</span></h2>
+<p class="meta">VMSS and Batch are scanned as separate compute sidecars. They are visible here even when zero resources are impacted, and remain outside standalone VM waves and backlog counts.</p>
+<div class="kpis preview-kpis">
+<div class="kpi"><div class="kpi-label">VMSS scanned</div><div class="kpi-value">1</div><div class="kpi-sub">1 on retirement path</div></div>
+<div class="kpi"><div class="kpi-label">Batch pools scanned</div><div class="kpi-value">1</div><div class="kpi-sub">0 on retirement path</div></div>
+</div>
+</section>
+
+<section class="panel preview-panel"><h2>Preview Remediation Queue - VMSS and Batch <span class="tag tag-preview">Public Preview</span></h2><p class="meta">Operational remediation queue for preview sidecars. These resources are visible in executive totals, but remain outside standalone VM waves because VMSS and Batch require model-level rollout and pool-level replacement patterns.</p><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Resource</th><th>Operational model</th><th>Remediation pattern</th><th>Guardrails</th></tr></thead><tbody><tr><td><span class="tag tag-learn">2028-05-01</span></td><td><strong>demo-vmss-web-01</strong><br><span class="meta">VMSS · italynorth</span></td><td>SKU: Standard_DS2_v2<br>Capacity: 2<br><span class="meta">Orchestration: Uniform · Upgrade: Manual</span></td><td>Update the scale set model to a supported VM size, then roll instances in controlled batches using planned upgrade/reimage windows.</td><td>Validate image generation, extensions, health probes, autoscale rules, regional quota/capacity and rollback path before applying the model update.</td></tr></tbody></table></div></section>
+
+<section class="panel preview-panel"><h2>Azure Batch Pool Exposure <span class="tag tag-preview">Public Preview</span></h2><p class="meta">Batch pools are separate Azure Batch resources that use normal Azure VM sizes. This preview reuses the same VM-size retirement resolver, but keeps Batch out of the VM retirement totals.</p><div class="kpis preview-kpis"><div class="kpi"><div class="kpi-label">Batch pools scanned</div><div class="kpi-value">1</div></div><div class="kpi"><div class="kpi-label">On retirement path</div><div class="kpi-value">0</div></div></div><p class="meta">No Batch pool VM sizes matched the current retirement path in this scope.</p></section>
+
+<section class="panel preview-panel"><h2>Virtual Machine Scale Set Exposure <span class="tag tag-preview">Public Preview</span></h2><p class="meta">VM Scale Sets are separate compute resources that use normal Azure VM sizes. This preview matches VMSS <code>sku.name</code> against the same live VM-size retirement resolver, but keeps VMSS out of the VM retirement totals.</p><div class="kpis preview-kpis"><div class="kpi"><div class="kpi-label">VMSS scanned</div><div class="kpi-value">1</div></div><div class="kpi"><div class="kpi-label">On retirement path</div><div class="kpi-value">1</div></div></div><div class="table-wrap"><table><thead><tr><th>Scale set</th><th>VM size</th><th>Retirement</th><th>Scale set model</th><th>Action</th></tr></thead><tbody><tr><td><strong>demo-vmss-web-01</strong><br><span class="meta">italynorth</span></td><td>Standard_DS2_v2<br><span class="meta">Dsv2-series</span></td><td><span class="tag tag-learn">LiveLearnMarkdown</span><br><span class="meta">Date: 2028-05-01</span></td><td>Capacity: 2<br>Orchestration: Uniform<br>Upgrade: Manual<br><span class="meta">OS: Linux · State: Succeeded</span></td><td>Validate VMSS model, orchestration mode, image compatibility, capacity/quota and upgrade policy; roll to a supported VM size through a controlled scale set update.</td></tr></tbody></table></div></section>
+
+<section class="panel monitoring-panel">
+<h2>Monitoring Lifecycle</h2>
+<span class="outside-count">Separate track · outside compute retirement count</span>
+<p>Dependency Agent / VM Insights Map retirement is tracked separately and does not contribute to the 9 compute retirement count.</p>
+<div class="kpis">
+<div class="kpi"><div class="kpi-label">Confirmed</div><div class="kpi-value">8</div></div>
+<div class="kpi"><div class="kpi-label">Unconfirmed</div><div class="kpi-value">0</div></div>
+<div class="kpi"><div class="kpi-label">Unknown</div><div class="kpi-value">0</div></div>
+</div>
+<div class="table-wrap"><table class="monitor-table"><thead><tr><th>VM</th><th>Feature retiring</th><th>Retirement date</th><th>Agent state</th><th>Action</th></tr></thead><tbody><tr><td><strong>demo-vm-avd-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-avd-02</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-sync-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-dc-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-app-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-web-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-app-02</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr><tr><td><strong>demo-vm-hub-01</strong></td><td>Dependency Agent / VM Insights Map</td><td>2028-06-30</td><td><span class="tag tag-gen">Confirmed</span></td><td>Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.</td></tr></tbody></table></div>
+</section>
+</div>
+
+<div class="tab-panel tab-finops">
+<div class="tab-heading"><h2>FinOps</h2><p>Retail/list-price deltas and Reserved Instance/Savings Plan planning signals.</p></div>
+
+<section class="panel">
+<h2>Cost Impact (monthly)</h2>
+<div class="money-grid"><div class="money-cell"><div class="money-label">Net</div><div class="money-value">+39.50 / month</div></div></div>
+</section>
+
+<section class="panel">
+<h2>VM Cost Detail<span class="info-dot" title="Per-VM PAYG/list-price delta for FinOps review. This is not negotiated pricing and does not calculate RI/Savings Plan effective rates.">i</span></h2>
+<p class="meta">Standalone VM candidates only. Retail/list-price estimate from cached Azure Retail Prices; validate negotiated pricing, reservations and Savings Plans separately.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>VM</th><th>Wave</th><th>Current SKU</th><th>Recommended SKU</th><th>Retail delta / month</th><th>Pricing basis</th><th>FinOps note</th></tr></thead>
+<tbody><tr><td><strong>demo-batch-pool-01</strong><br><span class="meta">italynorth</span></td><td><span class="wave-badge w0">W0 · Time-critical</span></td><td>Standard_DS2_v2</td><td>Standard_D2ads_v7</td><td>-1.46 / month (-1.47%)</td><td>Linux retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-dc-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w1">W1 · Advisor + sensitive</span></td><td>Standard_F2</td><td>Standard_F2als_v7</td><td>+19.71 / month (+13.11%)</td><td>Windows retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-sync-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w2">W2 · Sensitive validation</span></td><td>Standard_B2ms</td><td>Standard_B2as_v2</td><td>-5.69 / month (-7.65%)</td><td>Windows retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-auth-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w2">W2 · Sensitive validation</span></td><td>Standard_B4ms</td><td>Standard_B4as_v2</td><td>-12.41 / month (-8.29%)</td><td>Windows retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-app-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w3">W3 · Architecture</span></td><td>Standard_A1_v2</td><td>Standard_F1als_v7</td><td>+21.39 / month (+71.46%)</td><td>Linux retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-app-02</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w3">W3 · Architecture</span></td><td>Standard_A1_v2</td><td>Standard_F1als_v7</td><td>+21.39 / month (+71.46%)</td><td>Linux retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-web-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w3">W3 · Architecture</span></td><td>Standard_A1_v2</td><td>Standard_F1als_v7</td><td>+21.39 / month (+71.46%)</td><td>Linux retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-client-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w4">W4 · Low complexity</span></td><td>Standard_B4ms</td><td>Standard_B4as_v2</td><td>-12.41 / month (-8.29%)</td><td>Windows retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr><tr><td><strong>demo-vm-win-01</strong><br><span class="meta">uksouth</span></td><td><span class="wave-badge w4">W4 · Low complexity</span></td><td>Standard_B4ms</td><td>Standard_B4as_v2</td><td>-12.41 / month (-8.29%)</td><td>Windows retail meter</td><td>PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.</td></tr></tbody>
+</table>
+</div>
+</section>
+
+<section class="panel finops-panel"><h2>Reserved Instance Cutoff Planning <span class="tag tag-preview">Public Preview</span></h2><p class="meta">FinOps sidecar: new purchase and renewal of Reserved VM Instances stops on 2026-07-01 for selected legacy VM families. This is not a VM shutdown signal, is excluded from retirement counts, waves and backlog, and does not prove that this tenant has active RI purchases.</p><div class="kpis preview-kpis"><div class="kpi"><div class="kpi-label">Compute resources scanned</div><div class="kpi-value">14</div></div><div class="kpi"><div class="kpi-label">Resources in cutoff families</div><div class="kpi-value">11</div></div></div><div class="table-wrap"><table><thead><tr><th>VM family</th><th>Resources in scope</th><th>VM sizes seen</th><th>RI purchase/renewal cutoff</th><th>VM retirement signal</th><th>Action</th></tr></thead><tbody><tr><td><strong>Av2/Amv2-series</strong></td><td><strong>3</strong><br><span class="meta">VirtualMachine: 3</span></td><td>Standard_A1_v2</td><td><span class="tag tag-advisor">2026-07-01</span><br><span class="meta">Planning signal only; actual RI inventory is not queried</span></td><td>2028-11-15</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr><tr><td><strong>B-series (V1)</strong></td><td><strong>4</strong><br><span class="meta">VirtualMachine: 4</span></td><td>Standard_B2ms, Standard_B4ms</td><td><span class="tag tag-advisor">2026-07-01</span><br><span class="meta">Planning signal only; actual RI inventory is not queried</span></td><td>2028-11-15</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr><tr><td><strong>Dsv2-series</strong></td><td><strong>2</strong><br><span class="meta">VirtualMachine: 1<br>VirtualMachineScaleSet: 1</span></td><td>Standard_DS2_v2</td><td><span class="tag tag-advisor">2026-07-01</span><br><span class="meta">Planning signal only; actual RI inventory is not queried</span></td><td>2028-05-01</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr><tr><td><strong>Dv3-series</strong></td><td><strong>1</strong><br><span class="meta">BatchPool: 1</span></td><td>STANDARD_D2S_V3</td><td><span class="tag tag-advisor">2026-07-01</span><br><span class="meta">Planning signal only; actual RI inventory is not queried</span></td><td>No VM-size retirement signal from this cutoff alone</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr><tr><td><strong>F-series</strong></td><td><strong>1</strong><br><span class="meta">VirtualMachine: 1</span></td><td>Standard_F2</td><td><span class="tag tag-advisor">2026-07-01</span><br><span class="meta">Planning signal only; actual RI inventory is not queried</span></td><td>2028-11-15</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr></tbody></table></div></section>
+</div>
+
+<div class="tab-panel tab-coverage">
+<div class="tab-heading"><h2>Coverage and Evidence</h2><p>Scope, source limitations, provenance and report disclaimer for audit and validation.</p></div>
+
+<details class="accordion" open="">
+<summary>Analysis Coverage</summary>
+<div class="accordion-body">
+<div class="coverage">
+<p><strong>What this script covers:</strong> Azure Advisor recommendations in the <em>Reliability → Service Upgrade and Retirement</em> subcategory, across all SKU families (no fixed list), with retirement date / retiring feature when available.</p>
+<p><strong>What it does NOT cover / manual verification required:</strong></p>
+<ul>
+<li>Retirements present <strong>only in Azure Service Health</strong> (not emitted by Advisor). → Check <em>Service Health → Health advisories</em> and the <em>Impacted Resources</em> tab.</li>
+<li>Services not yet covered by the <em>Service Retirement Workbook</em> (partial coverage). → Verify in <em>Advisor → Workbooks → Service Retirement</em>.</li>
+<li>Public announcements without a mapping to a resource. → Check <em>Azure Updates</em>.</li>
+<li>Service Health retention in Azure Resource Graph is 90 days: reconcile within that window.</li>
+</ul>
+</div>
+</div>
+</details><div class="footer"><strong>Provenance:</strong> generated at 2026-07-13 09:31:50, live sources: Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook), as-of: 2026-07-13. <strong>Disclaimer:</strong> this script is not an official Microsoft tool; always validate in authoritative sources before decisions.</div>
+</div>
+</main>
+</div>
+
+
+</body></html>
+
+

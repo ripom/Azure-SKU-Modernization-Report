@@ -2,6 +2,10 @@
 
 **Current version:** `v0.4`
 
+> **See the output first:** open the anonymized sample dashboard:
+> [examples/Azure-SKU-Modernization-Report-example.html](examples/Azure-SKU-Modernization-Report-example.html).
+> It shows the generated HTML report experience without publishing real Azure resource names.
+
 Generates a fully deterministic Azure VM modernization report (SKU retirements, migration candidates,
 retail cost delta, readiness) including a fact-derived executive dashboard. Output: CSV, JSON
 and a scan-first HTML dashboard in `out/<timestamp>/`.
