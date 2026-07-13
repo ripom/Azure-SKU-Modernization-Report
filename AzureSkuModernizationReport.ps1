@@ -142,6 +142,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# Retirement risk thresholds. Keep these as the single source of truth for risk labels and wave urgency.
+[int]$script:RiskCriticalDays = 365
+[int]$script:RiskHighDays = 730
+$script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
 $script:RetailLastPageCount = 0
 $script:RetailLastDownloadComplete = $true
 $script:CommitmentLastDownloadComplete = $true
@@ -903,8 +907,9 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
 
     # Uses the SAME reliable pattern as the consumption-price download: region-scoped OData filter paged to
     # completion with NextPageLink (NOT the old discovery-Count + deep $skip scheme, which stops returning
-    # rows past a few thousand records). Parallelized across region/kind filters. RI is required; SP is
-    # optional (some scopes reject the SavingsPlan filter with 400 and are treated as unavailable).
+    # rows past a few thousand records). Reservation signals are represented as standalone Retail price
+    # records; Savings Plan eligibility must be read from nested data on Consumption records, not queried as
+    # a standalone priceType here.
     $baseUrl = "https://prices.azure.com/api/retail/prices"
     $currencyQuery = if (-not [string]::IsNullOrWhiteSpace($Currency)) { "&currencyCode='$Currency'" } else { "" }
 
@@ -914,8 +919,7 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
     }
 
     $kinds = @(
-        [pscustomobject]@{ Kind = 'RI'; PriceType = 'Reservation'; Optional = $false },
-        [pscustomobject]@{ Kind = 'SP'; PriceType = 'SavingsPlan'; Optional = $true }
+        [pscustomobject]@{ Kind = 'RI'; PriceType = 'Reservation'; Optional = $false }
     )
 
     $filterTargets = New-Object 'System.Collections.Generic.List[object]'
@@ -2568,108 +2572,141 @@ function Get-OfficialRetirementsFromLearnMarkdown {
         
         $markdown = [string]$response.Content
         
-        # Parse markdown tables: each table row is "| Series name | ... | Planned Retirement Date |"
-        # Rows start after header separator (---), and retirement date column is US format MM/DD/YY
+        # Parse every markdown table shaped like the Learn retirement list.
         $lines = $markdown -split "`n"
-        
-        # Find header row and identify column indices
-        $headerRowIdx = -1
-        $headerLine = ""
-        
-        for ($lineIdx = 0; $lineIdx -lt $lines.Count; $lineIdx++) {
-            if ($lines[$lineIdx] -like "*Series*" -and $lines[$lineIdx] -like "*|*") {
-                $headerLine = $lines[$lineIdx]
-                $headerRowIdx = $lineIdx
-                break
-            }
+
+        $getMarkdownColumns = {
+            param([string]$Line)
+
+            $trimmed = ([string]$Line).Trim()
+            if (-not $trimmed.StartsWith('|')) { return @() }
+            if ($trimmed.EndsWith('|')) { $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) }
+            if ($trimmed.StartsWith('|')) { $trimmed = $trimmed.Substring(1) }
+            return @($trimmed -split '\|' | ForEach-Object { $_.Trim() })
         }
-        
-        if ($headerRowIdx -lt 0) {
-            Write-Log "Learn markdown: header row not found" "ERROR"
-            return [pscustomobject]@{
-                Ok              = $false
-                Series          = @()
-                Url             = $Url
-                ParsedRowCount  = 0
-                Error           = "Header row not found in markdown table"
-            }
+
+        $getCleanCell = {
+            param([string]$Value)
+
+            $clean = [string]$Value
+            $clean = $clean -replace '<br\s*/?>', ' '
+            $clean = $clean -replace '\[([^\]]+)\]\([^\)]+\)', '$1'
+            $clean = $clean -replace '[*_`]', ''
+            $clean = $clean -replace '\s+', ' '
+            return $clean.Trim()
         }
-        
-        # Parse header to find column indices
-        $headerCols = $headerLine -split "\|"
-        $headerCols = $headerCols | ForEach-Object { $_.Trim() }
-        $headerCols = $headerCols | Where-Object { $_ }
-        
-        # Find "Planned Retirement Date" column index
-        $dateColIdx = -1
-        for ($i = 0; $i -lt $headerCols.Count; $i++) {
-            if ($headerCols[$i] -like "*Planned*Retirement*Date*") {
-                $dateColIdx = $i
-                break
+
+        $learnPageUrl = 'https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/retirement/retired-sizes-list'
+        $getMarkdownLinkUrl = {
+            param([string]$Value)
+
+            $match = [regex]::Match([string]$Value, '\[[^\]]+\]\(([^\)\s]+)')
+            if (-not $match.Success) { return $null }
+
+            $target = $match.Groups[1].Value
+            $absoluteUri = $null
+            if ([uri]::TryCreate($target, [System.UriKind]::Absolute, [ref]$absoluteUri)) {
+                return $absoluteUri.AbsoluteUri
             }
+
+            return ([uri]::new([uri]$learnPageUrl, $target)).AbsoluteUri
         }
-        
-        if ($dateColIdx -lt 0) {
-            Write-Log "Learn markdown: 'Planned Retirement Date' column not found. Headers: $($headerCols -join ' | ')" "ERROR"
-            return [pscustomobject]@{
-                Ok              = $false
-                Series          = @()
-                Url             = $Url
-                ParsedRowCount  = 0
-                Error           = "Planned Retirement Date column not found"
+
+        $testSeparatorRow = {
+            param([object[]]$Columns)
+
+            if (-not $Columns -or $Columns.Count -eq 0) { return $false }
+            foreach ($col in @($Columns)) {
+                if (($col -replace '[:\-\s]', '') -ne '') { return $false }
             }
+            return $true
         }
-        
-        # Parse data rows with per-row error handling
-        $culture = [System.Globalization.CultureInfo]::new("en-US")
+
+        $parseLearnDate = {
+            param([string]$Value)
+
+            $dateText = (& $getCleanCell $Value)
+            if ([string]::IsNullOrWhiteSpace($dateText) -or $dateText -eq '-') { return $null }
+
+            $culture = [System.Globalization.CultureInfo]::InvariantCulture
+            $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal
+            $formats = @('M/d/yy', 'MM/dd/yy', 'M/d/yyyy', 'MM/dd/yyyy', 'd/M/yy', 'dd/M/yy', 'd/M/yyyy', 'dd/M/yyyy', 'yyyy-MM-dd')
+            $dt = [datetime]::MinValue
+            foreach ($format in $formats) {
+                if ([datetime]::TryParseExact($dateText, $format, $culture, $styles, [ref]$dt)) {
+                    return $dt
+                }
+            }
+
+            return $null
+        }
+
+        $foundRetirementTable = $false
         $parsedRowCount = 0
-        
-        for ($i = $headerRowIdx + 2; $i -lt $lines.Count; $i++) {
-            $line = $lines[$i]
-            
-            # Skip empty lines and end of table
-            if ([string]::IsNullOrWhiteSpace($line) -or -not ($line -like "|*")) {
-                break
+
+        for ($lineIdx = 0; $lineIdx -lt $lines.Count; $lineIdx++) {
+            $headerCols = @(& $getMarkdownColumns $lines[$lineIdx])
+            if ($headerCols.Count -eq 0) { continue }
+
+            $seriesColIdx = -1
+            $statusColIdx = -1
+            $announcementColIdx = -1
+            $dateColIdx = -1
+            $migrationGuideColIdx = -1
+            for ($i = 0; $i -lt $headerCols.Count; $i++) {
+                $header = (& $getCleanCell $headerCols[$i]).ToLowerInvariant()
+                if ($header -like '*series*name*') { $seriesColIdx = $i }
+                elseif ($header -like '*retirement*status*') { $statusColIdx = $i }
+                elseif ($header -like '*retirement*announcement*') { $announcementColIdx = $i }
+                elseif ($header -like '*planned*retirement*date*') { $dateColIdx = $i }
+                elseif ($header -like '*migration*guide*') { $migrationGuideColIdx = $i }
             }
-            
-            # Parse columns
-            $cols = $line -split "\|"
-            $cols = $cols | ForEach-Object { $_.Trim() }
-            $cols = $cols | Where-Object { $_ }
-            
-            if ($cols.Count -eq 0) {
-                continue
+
+            if ($seriesColIdx -lt 0 -or $dateColIdx -lt 0) { continue }
+
+            $foundRetirementTable = $true
+            $rowIdx = $lineIdx + 1
+            if ($rowIdx -lt $lines.Count -and (& $testSeparatorRow @(& $getMarkdownColumns $lines[$rowIdx]))) {
+                $rowIdx++
             }
-            
-            $seriesName = $cols[0]
-            $dateStr = if ($cols.Count -gt $dateColIdx) { $cols[$dateColIdx] } else { "" }
-            
-            # Try to parse date (per-row error handling) — ONLY parsing logic
-            $parseSuccess = $false
-            $dt = $null
-            
-            try {
-                $dt = [DateTime]::ParseExact($dateStr, "MM/dd/yy", $culture)
-                $parseSuccess = $true
-            }
-            catch {
-                Write-Log "Learn markdown parse error for series=$seriesName, date='$dateStr': $($_.Exception.Message)" "WARN"
-            }
-            
-            # Logging is OUTSIDE the parse try/catch, so an error logging can never discard a parsed row
-            if ($parseSuccess) {
-                $retireOnIso = $dt.ToString("yyyy-MM-dd")
+
+            for ($rowIdx; $rowIdx -lt $lines.Count; $rowIdx++) {
+                $line = $lines[$rowIdx]
+                if ([string]::IsNullOrWhiteSpace($line) -or -not ([string]$line).Trim().StartsWith('|')) {
+                    break
+                }
+
+                $cols = @(& $getMarkdownColumns $line)
+                if ($cols.Count -eq 0 -or (& $testSeparatorRow $cols)) { continue }
+
+                $seriesName = if ($cols.Count -gt $seriesColIdx) { & $getCleanCell $cols[$seriesColIdx] } else { '' }
+                $dateStr = if ($cols.Count -gt $dateColIdx) { & $getCleanCell $cols[$dateColIdx] } else { '' }
+                if ([string]::IsNullOrWhiteSpace($seriesName)) { continue }
+
+                $dt = & $parseLearnDate $dateStr
+                if (-not $dt) {
+                    Write-Log "Learn markdown parse error for series=$seriesName, date='$dateStr': unsupported date format" "WARN"
+                    continue
+                }
+
+                $status = if ($statusColIdx -ge 0 -and $cols.Count -gt $statusColIdx) { & $getCleanCell $cols[$statusColIdx] } else { 'Announced' }
+                if ([string]::IsNullOrWhiteSpace($status) -or $status -eq '-') { $status = 'Announced' }
+                $announcement = if ($announcementColIdx -ge 0 -and $cols.Count -gt $announcementColIdx) { & $getMarkdownLinkUrl $cols[$announcementColIdx] } else { $null }
+                if ([string]::IsNullOrWhiteSpace($announcement)) { $announcement = $learnPageUrl }
+                $migrationGuide = if ($migrationGuideColIdx -ge 0 -and $cols.Count -gt $migrationGuideColIdx) { & $getMarkdownLinkUrl $cols[$migrationGuideColIdx] } else { $null }
+                if ([string]::IsNullOrWhiteSpace($migrationGuide)) { $migrationGuide = $learnPageUrl }
+
+                $retireOnIso = $dt.ToString('yyyy-MM-dd')
                 $parsedRowCount++
-                
-                # Safe logging (error here won't discard data)
-                Write-Log "Learn markdown parsed: series=$seriesName, date=$dateStr -> $retireOnIso" "DEBUG"
-                
+
+                Write-Log "Learn markdown parsed: series=$seriesName, status=$status, date=$dateStr -> $retireOnIso" "DEBUG"
+
                 $entries += [pscustomobject]@{
                     SeriesName         = $seriesName
-                    Status             = "Announced"
+                    Status             = $status
                     RetireOn           = $retireOnIso
-                    Announcement       = "Official Azure retirement announcement (Learn markdown)"
-                    MigrationGuide     = "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/retirement/retired-sizes-list"
+                    Announcement       = $announcement
+                    MigrationGuide     = $migrationGuide
                     Notes              = "LiveLearnMarkdown - SKU-family exposure (verify scope per-VM)"
                     MatchRegexes       = @()
                     Source             = "LiveLearnMarkdown"
@@ -2678,7 +2715,18 @@ function Get-OfficialRetirementsFromLearnMarkdown {
                 }
             }
         }
-        
+
+        if (-not $foundRetirementTable) {
+            Write-Log "Learn markdown: retirement table header not found" "ERROR"
+            return [pscustomobject]@{
+                Ok              = $false
+                Series          = @()
+                Url             = $Url
+                ParsedRowCount  = 0
+                Error           = "Retirement markdown table header not found"
+            }
+        }
+
         if ($parsedRowCount -eq 0) {
             Write-Log "Learn markdown: 0 retirement rows parsed. Table structure may have changed." "WARN"
             return [pscustomobject]@{
@@ -2731,22 +2779,25 @@ function Convert-SkuToSeriesKey {
     
     $normalized = ConvertTo-NormalizedSkuName $SkuName
     
-    # Mapping table: normalized SKU pattern → Learn series key
+    # Mapping table: normalized SKU pattern -> Learn series key
     $mapping = @{
-        "^standard_d\d+[a-z-]*_v2$"       = "Dv2-series"
         "^standard_ds\d+[a-z-]*_v2$"      = "Dsv2-series"
-        "^standard_d\d+[a-z-]*(?!_v2)$"   = "D-series"
-        "^standard_ds\d+[a-z-]*(?!_v2)$"  = "Ds-series"
-        "^standard_l\d+[a-z-]*$"          = "Ls-series"
+        "^standard_d\d+[a-z-]*_v2$"       = "Dv2-series"
+        "^standard_fs\d+[a-z-]*_v2$"      = "Fsv2-series"
+        "^standard_f\d+[a-z-]*_v2$"       = "Fsv2-series"
         "^standard_l\d+[a-z-]*_v2$"       = "Lsv2-series"
+        "^standard_nv\d+[a-z-]*_v3$"      = "NVv3-series"
+        "^standard_np\d+[a-z-]*$"         = "NP-series"
+        "^standard_nc\d+[a-z-]*_v3$"      = "NCv3-Series"
+        "^standard_ds\d+[a-z-]*$"         = "Ds-series"
+        "^standard_d\d+[a-z-]*$"          = "D-series"
+        "^standard_l\d+[a-z-]*$"          = "Ls-series"
         "^standard_a\d+m?_v2$"            = "Av2/Amv2-series"
         "^standard_b\d+[a-z-]*$"          = "B-series (V1)"
-        "^standard_f\d+[a-z-]*$"          = "F-series"
         "^standard_fs\d+[a-z-]*$"         = "Fs-series"
-        "^standard_f\d+[a-z-]*_v2$"       = "Fsv2-series"
-        "^standard_fs\d+[a-z-]*_v2$"      = "Fsv2-series"
-        "^standard_g\d+[a-z-]*$"          = "G-series"
+        "^standard_f\d+[a-z-]*$"          = "F-series"
         "^standard_gs\d+[a-z-]*$"         = "Gs-series"
+        "^standard_g\d+[a-z-]*$"          = "G-series"
     }
     
     foreach ($pattern in $mapping.Keys) {
@@ -2789,12 +2840,14 @@ function Resolve-OfficialRetirementLiveOnly {
         $seriesEntry = @($LiveLearnSeries | Where-Object { $_.SeriesName -eq $seriesKey }) | Select-Object -First 1
         if ($seriesEntry) {
             return [pscustomobject]@{
-                Status         = "Announced"
+                Status         = [string]$seriesEntry.Status
                 RetireOn       = $seriesEntry.RetireOn
                 Source         = "LiveLearnMarkdown"
                 SeriesName     = $seriesKey
                 SourceUrl      = $seriesEntry.SourceUrl
                 AsOf           = $seriesEntry.AsOf
+                MigrationGuide = $seriesEntry.MigrationGuide
+                Announcement   = $seriesEntry.Announcement
                 SourceGate     = "LiveLearnMarkdown"
                 IsLive         = $true
             }
@@ -2865,6 +2918,7 @@ AdvisorResources
     # signals are captured here and are NOT counted on the retirement path.
     $upgradeSignals = New-Object 'System.Collections.Generic.List[object]'
     $upgradeOnlyCount = 0
+    $sourceComplete = $true
 
     foreach ($subId in $subList) {
         $pageSize = 1000
@@ -2887,6 +2941,7 @@ AdvisorResources
             catch {
                 Add-ApiCallLog -Api "Search-AzGraph" -Provider "Az.ResourceGraph" -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request "AdvisorResources (Live)" -StartedAt $searchStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
                 Write-Log "Live retirement source (Advisor ARG) fetch failed on subscription ${subId}: $($_.Exception.Message)" "WARN"
+                $sourceComplete = $false
                 break
             }
 
@@ -2970,6 +3025,10 @@ AdvisorResources
     }
     if ($upgradeOnlyCount -gt 0) {
         Write-Log ("Advisor Service Upgrade and Retirement: {0} upgrade-only signal(s) (no retirement date) captured separately and NOT counted on the retirement path." -f $upgradeOnlyCount) "INFO"
+    }
+
+    if (-not $sourceComplete) {
+        throw "Live retirement source (Advisor ARG) incomplete; at least one subscription fetch failed."
     }
 
     return [pscustomobject]@{
@@ -3159,6 +3218,24 @@ function Resolve-RetirementForSku {
     }
 
     if ($Retirements.PSObject.Properties.Match("Series").Count -gt 0 -and $Retirements.Series) {
+        $seriesKey = Convert-SkuToSeriesKey -SkuName $SkuName
+        if ($seriesKey) {
+            $seriesEntry = @($Retirements.Series | Where-Object { $_.SeriesName -eq $seriesKey }) | Select-Object -First 1
+            if ($seriesEntry) {
+                return [pscustomobject]@{
+                    Status         = [string]$seriesEntry.Status
+                    RetireOn       = [string]$seriesEntry.RetireOn
+                    Notes          = [string]$seriesEntry.Notes
+                    Source         = if ($seriesEntry.PSObject.Properties.Match('Source').Count -gt 0 -and $seriesEntry.Source) { [string]$seriesEntry.Source } else { 'OfficialMicrosoftLearn' }
+                    SeriesName     = [string]$seriesEntry.SeriesName
+                    MigrationGuide = [string]$seriesEntry.MigrationGuide
+                    Announcement   = [string]$seriesEntry.Announcement
+                    SourceUrl      = if ($seriesEntry.PSObject.Properties.Match('SourceUrl').Count -gt 0) { [string]$seriesEntry.SourceUrl } else { '' }
+                    AsOf           = if ($seriesEntry.PSObject.Properties.Match('AsOf').Count -gt 0) { [string]$seriesEntry.AsOf } else { '' }
+                }
+            }
+        }
+
         foreach ($entry in $Retirements.Series) {
             $regexes = @()
             if ($entry.PSObject.Properties.Match("MatchRegexes").Count -gt 0) {
@@ -3617,6 +3694,40 @@ function Test-CandidateTechnicalCompatibility {
     return $true
 }
 
+function Test-CandidateAllowedForScope {
+    param(
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Location,
+        [Parameter(Mandatory = $false)][string]$SubscriptionId = ''
+    )
+
+    $normalizedLocation = ConvertTo-NormalizedLocation $Location
+    foreach ($restriction in @($Candidate.Restrictions)) {
+        if (-not $restriction) { continue }
+
+        $reasonCode = if ($restriction.PSObject.Properties.Match('reasonCode').Count -gt 0) { [string]$restriction.reasonCode } else { '' }
+        if ($reasonCode -and $reasonCode -notmatch '(?i)NotAvailable|NotSupported') { continue }
+
+        $restrictedLocations = @()
+        if ($restriction.PSObject.Properties.Match('values').Count -gt 0 -and $restriction.values) {
+            $restrictedLocations += @($restriction.values | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) })
+        }
+        if ($restriction.PSObject.Properties.Match('restrictionInfo').Count -gt 0 -and $restriction.restrictionInfo) {
+            $info = $restriction.restrictionInfo
+            if ($info.PSObject.Properties.Match('locations').Count -gt 0 -and $info.locations) {
+                $restrictedLocations += @($info.locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) })
+            }
+        }
+
+        $restrictedLocations = @($restrictedLocations | Where-Object { $_ } | Sort-Object -Unique)
+        if ($restrictedLocations.Count -eq 0 -or $normalizedLocation -in $restrictedLocations) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Get-RetirementEvidence {
     param([Parameter(Mandatory = $false)]$RetirementEntry)
 
@@ -3699,6 +3810,27 @@ function Get-WorkloadRole {
     return [pscustomobject]@{ Role = "GeneralCompute"; Conservative = $false; Source = "default" }
 }
 
+function Get-RetirementRiskLevel {
+    param(
+        [Parameter(Mandatory = $false)]$RetirementDate,
+        [Parameter(Mandatory = $false)][datetime]$AsOf = (Get-Date),
+        [Parameter(Mandatory = $false)][bool]$AdvisorConfirmedImminent = $false
+    )
+
+    if ($AdvisorConfirmedImminent) { return 'Critical' }
+    if ($null -eq $RetirementDate) { return 'Watch' }
+
+    if (-not ($script:RiskCriticalDays -gt 0) -or -not ($script:RiskHighDays -gt 0)) {
+        throw 'Risk thresholds are not initialized.'
+    }
+    $criticalDays = [int]$script:RiskCriticalDays
+    $highDays = [int]$script:RiskHighDays
+    $daysToRetire = [int][math]::Floor((([datetime]$RetirementDate) - $AsOf).TotalDays)
+    if ($daysToRetire -le $criticalDays) { return 'Critical' }
+    if ($daysToRetire -le $highDays) { return 'High' }
+    return 'Medium'
+}
+
 function Get-RetirementRisk {
     param(
         [Parameter(Mandatory = $false)]$RetirementEntry,
@@ -3706,24 +3838,22 @@ function Get-RetirementRisk {
         [Parameter(Mandatory = $true)][int]$CurrentVersion
     )
 
-    $daysToRetire = $null
+    $retireOn = $null
     if ($RetirementEntry -and $RetirementEntry.PSObject.Properties.Match("RetireOn").Count -gt 0 -and $RetirementEntry.RetireOn) {
         $rd = [datetime]::MinValue
         if ([datetime]::TryParse([string]$RetirementEntry.RetireOn, [ref]$rd)) {
-            $daysToRetire = [int][math]::Round(($rd - (Get-Date)).TotalDays, 0)
+            $retireOn = $rd
         }
     }
 
     $hasOfficial = ($EvidenceType -eq "PublicOfficialAnnouncement")
-
-    if ($null -ne $daysToRetire -and $hasOfficial) {
-        if ($daysToRetire -le 365) { return [pscustomobject]@{ Level = "Critical"; Reason = "Official retirement within 12 months" } }
-        if ($daysToRetire -le 730) { return [pscustomobject]@{ Level = "High"; Reason = "Official retirement within 24 months" } }
-        return [pscustomobject]@{ Level = "Medium"; Reason = "Official retirement announced beyond 24 months" }
-    }
-
-    if ($null -ne $daysToRetire -and -not $hasOfficial) {
-        return [pscustomobject]@{ Level = "Watch"; Reason = "Non-official retirement signal (advisor/tenant)" }
+    if ($null -ne $retireOn) {
+        $riskLevel = Get-RetirementRiskLevel -RetirementDate $retireOn
+        $daysLabel = if ($riskLevel -eq 'Critical') { 'within 12 months' } elseif ($riskLevel -eq 'High') { 'within 24 months' } else { 'beyond 24 months' }
+        if ($hasOfficial) {
+            return [pscustomobject]@{ Level = $riskLevel; Reason = "Official retirement $daysLabel" }
+        }
+        return [pscustomobject]@{ Level = $riskLevel; Reason = "Retirement signal $daysLabel" }
     }
 
     if ($CurrentVersion -le 2) {
@@ -4002,6 +4132,80 @@ function Build-Recommendations {
 
         if (-not $currSku) {
             Write-Log "SKU not found in compute catalog: $($vm.VmSize)" "WARN"
+            $retirement = Resolve-RetirementForVmOrSku -Vm $vm -Retirements $Retirements
+            $retirementEvidence = Get-RetirementEvidence -RetirementEntry $retirement
+            $effectiveRetirementDate = if ($retirement) { Format-NullableDate $retirement.RetireOn } else { 'N/A' }
+            $retirementRisk = Get-RetirementRisk -RetirementEntry $retirement -EvidenceType $retirementEvidence.EvidenceType -CurrentVersion 0
+
+            $rows.Add([pscustomobject]@{
+                SubscriptionId         = $vm.SubscriptionId
+                ResourceGroup          = $vm.ResourceGroup
+                VmName                 = $vm.VmName
+                Region                 = $vm.Location
+                CurrentSku             = $vm.VmSize
+                CurrentArch            = 'Unknown'
+                OsType                 = $vmOsType
+                CurrentPriceOsBasis    = $currentPriceOsBasis
+                CurrentWindowsMeterAvailable = [bool]$currentWindowsMeterAvailable
+                VmCreatedDate          = $vm.VmCreatedDate
+                AnalysisDate           = $analysisDate
+                FirstSeenDate          = $analysisDate
+                LaunchDateSource       = 'analysis-date'
+                Confidence             = 'CatalogUnavailable_NeedsManualReview'
+                SuggestedSkus          = ''
+                SuggestedPrimarySku    = 'N/A'
+                CandidateTargetSku     = 'N/A'
+                UsageDataStatus        = 'Current SKU not found in compute catalog; manual validation required.'
+                WorkloadRole           = 'Unknown'
+                WorkloadRoleSource     = 'N/A'
+                CrossFamilySuppressed  = $false
+                SensitiveWorkload      = $false
+                GenerationChange       = $false
+                CurrentHyperVGenerations = 'N/A'
+                TargetHyperVGenerations  = 'N/A'
+                ValidationChecklist    = 'Manual review required: current SKU missing from compute catalog.'
+                SuggestedPrimaryArch   = 'N/A'
+                CostDeltaPercent       = $null
+                CostDeltaReported      = $null
+                RetailDeltaMonthly     = $null
+                CostDeltaStatus        = 'N/A'
+                CostDeltaPublishable   = $false
+                FinancialValidationStatus = 'N/A'
+                PerfDeltaPercent       = $null
+                PerfDeltaMethod        = 'N/A'
+                PerfModelCurrent       = 'N/A'
+                PerfModelTarget        = 'N/A'
+                MigrationPriority      = 'High'
+                MigrationEffort        = 'ManualReview'
+                MigrationRisk          = 'High'
+                MigrationRisksAndBlocks = 'Current SKU missing from compute catalog; no automated target selected.'
+                RetirementStatus       = if ($retirement) { $retirement.Status } else { 'Unknown' }
+                RetirementDate         = $effectiveRetirementDate
+                RetirementSource       = if ($retirement -and $retirement.PSObject.Properties.Match('Source').Count -gt 0) { [string]$retirement.Source } else { 'N/A' }
+                RetirementSourceGate   = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'LiveAdvisorArg' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'N/A' }
+                RetirementEvidenceType = $retirementEvidence.EvidenceType
+                RetirementEvidenceConfidence = $retirementEvidence.Confidence
+                EvidenceSource         = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'AdvisorSignalOnly' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'NoSignal' }
+                OfficialRetirementDate = $effectiveRetirementDate
+                AdvisorRetirementSignalDate = 'N/A'
+                RetirementRiskLevel    = $retirementRisk.Level
+                RetirementRiskReason   = $retirementRisk.Reason
+                RetirementSeriesMatch  = if ($retirement -and $retirement.PSObject.Properties.Match('SeriesName').Count -gt 0) { $retirement.SeriesName } else { 'N/A' }
+                RetirementAnnouncement = if ($retirement -and $retirement.PSObject.Properties.Match('Announcement').Count -gt 0) { $retirement.Announcement } else { 'N/A' }
+                RetirementMigrationGuide = if ($retirement -and $retirement.PSObject.Properties.Match('MigrationGuide').Count -gt 0) { $retirement.MigrationGuide } else { 'N/A' }
+                SuggestedRetirementStatus = 'N/A'
+                SuggestedRetirementDate = 'N/A'
+                SupportHorizonOutcome   = 'NoTarget'
+                SupportHorizonDeltaDays = $null
+                CommitmentRetirementImpact = $false
+                CommitmentRetirementImpactKinds = ''
+                CommitmentRetirementImpactDate = 'N/A'
+                CommitmentRetirementImpactNote = ''
+                RecommendationBasis     = 'Catalog unavailable'
+                HeuristicLevel          = 'N/A'
+                FinancialValidationStatusLabel = 'Not validated: current SKU missing from compute catalog.'
+                Recommendation          = 'Current SKU not found in compute catalog; keep inventory row and review manually.'
+            }) | Out-Null
             continue
         }
 
@@ -4118,6 +4322,23 @@ function Build-Recommendations {
                 $candidateStrategy = "nearby-family-compatible"
             }
         }
+
+        $candidatePool = @($candidatePool | Where-Object {
+            $scopeOk = Test-CandidateAllowedForScope -Candidate $_ -Location ([string]$vm.Location) -SubscriptionId ([string]$vm.SubscriptionId)
+            $costOk = $true
+            if ($currentPrice -gt 0) {
+                $candKey = "{0}|{1}" -f $_.Name, $vm.Location
+                if ($PriceMap.ContainsKey($candKey)) {
+                    $candPriceLocal = Get-RetailUnitPriceForOs -PriceEntry $PriceMap[$candKey] -OsType $vmOsType
+                    if ($candPriceLocal -gt 0) {
+                        $candDeltaPctLocal = (($candPriceLocal - $currentPrice) / $currentPrice) * 100
+                        $costOk = ($candDeltaPctLocal -le $MaxCostIncreasePercent)
+                    }
+                }
+            }
+
+            ($scopeOk -and $costOk)
+        })
 
         $orderedCandidates = New-Object 'System.Collections.Generic.List[object]'
         $candidateRanked = foreach ($cand in $candidatePool) {
@@ -4611,7 +4832,13 @@ function Export-BacklogItems {
     )
 
     $items = $Rows |
-        Where-Object { $_.MigrationPriority -in @("High", "Medium") } |
+        Where-Object {
+            $risk = if ($_.PSObject.Properties.Match('RetirementRiskLevel').Count -gt 0) { [string]$_.RetirementRiskLevel } else { '' }
+            $gate = if ($_.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$_.RetirementSourceGate } else { '' }
+            $retirementDate = if ($_.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$_.RetirementDate } else { '' }
+            $hasRetirementDate = (-not [string]::IsNullOrWhiteSpace($retirementDate) -and $retirementDate -notin @('N/A', 'No live retirement source'))
+            ($risk -in @('Critical', 'High') -or $gate -in @('LiveAdvisorArg', 'LiveLearnMarkdown') -or $hasRetirementDate)
+        } |
         Select-Object @(
             @{ Name = "Title"; Expression = { "SKU modernization - " + $_.VmName } },
             @{ Name = "Priority"; Expression = { $_.MigrationPriority } },
@@ -4949,16 +5176,18 @@ function Build-ReportFacts {
 
         if ($retirementClass -eq 'None') { continue }
 
+        $costDeltaPublishable = if ($row.PSObject.Properties.Match('CostDeltaPublishable').Count -gt 0) { [bool]$row.CostDeltaPublishable } else { $true }
+
         $retailDeltaMonthly = $null
-        if ($row.PSObject.Properties.Match('RetailDeltaMonthly').Count -gt 0 -and $null -ne $row.RetailDeltaMonthly -and ([string]$row.RetailDeltaMonthly).Trim() -ne '') {
+        if ($costDeltaPublishable -and $row.PSObject.Properties.Match('RetailDeltaMonthly').Count -gt 0 -and $null -ne $row.RetailDeltaMonthly -and ([string]$row.RetailDeltaMonthly).Trim() -ne '') {
             $retailDeltaMonthly = [double]$row.RetailDeltaMonthly
         }
 
         $costDeltaPercent = $null
-        if ($row.PSObject.Properties.Match('CostDeltaReported').Count -gt 0 -and $null -ne $row.CostDeltaReported -and ([string]$row.CostDeltaReported).Trim() -ne '') {
+        if ($costDeltaPublishable -and $row.PSObject.Properties.Match('CostDeltaReported').Count -gt 0 -and $null -ne $row.CostDeltaReported -and ([string]$row.CostDeltaReported).Trim() -ne '') {
             $costDeltaPercent = [double]$row.CostDeltaReported
         }
-        elseif ($row.PSObject.Properties.Match('CostDeltaPercent').Count -gt 0 -and $null -ne $row.CostDeltaPercent -and ([string]$row.CostDeltaPercent).Trim() -ne '') {
+        elseif ($costDeltaPublishable -and $row.PSObject.Properties.Match('CostDeltaPercent').Count -gt 0 -and $null -ne $row.CostDeltaPercent -and ([string]$row.CostDeltaPercent).Trim() -ne '') {
             $costDeltaPercent = [double]$row.CostDeltaPercent
         }
 
@@ -5225,7 +5454,7 @@ function Assert-DeliveryReady {
             & $record '2. Run' 'STREAM B live (Learn markdown)' 'PASS' 'STREAM B OK=True'
         }
         elseif ($logText -match 'STREAM B (failed|OK=False)') {
-            & $record '2. Run' 'STREAM B live (Learn markdown)' 'FAIL' 'STREAM B failed (Learn markdown unavailable).'
+            & $record '2. Run' 'STREAM B live (Learn markdown)' 'WARN' 'STREAM B failed (Learn markdown unavailable); partial-source policy permits remaining live source unless source health is BLOCK.'
         }
         else {
             & $record '2. Run' 'STREAM B live (Learn markdown)' 'WARN' 'STREAM B status not found in log.'
@@ -5419,13 +5648,19 @@ function Assert-DeliveryReady {
 function Get-SkuFamilyToken {
     <#
     .SYNOPSIS
-    Extracts the VM family token (the leading letters before the first digit) from a SKU name, used to
-    decide whether a recommendation crosses VM families (e.g. A1_v2 -> F1als_v7 is A -> F = cross-family).
+    Extracts the VM family token from a SKU name, used to decide whether a recommendation crosses VM
+    families (e.g. A1_v2 -> F1als_v7 is A -> F = cross-family). Legacy Premium Storage names place
+    the capability suffix S before the size digit (for example DS2_v2); normalize that suffix so a
+    Dsv2 -> Dadsv7 move remains in the D family.
     #>
     param([Parameter(Mandatory = $false)][string]$Sku)
     if ([string]::IsNullOrWhiteSpace($Sku)) { return '' }
     $s = $Sku -replace '^(?i)standard_', ''
-    if ($s -match '^([A-Za-z]+)') { return $matches[1].ToUpperInvariant() }
+    if ($s -match '^([A-Za-z]+)') {
+        $token = $matches[1].ToUpperInvariant()
+        if ($token -match '^(D|G)S$') { return $matches[1] }
+        return $token
+    }
     return ''
 }
 
@@ -5455,10 +5690,21 @@ function Get-RemediationRationale {
     #>
     param(
         [Parameter(Mandatory = $true)]$Row,
-        [Parameter(Mandatory = $false)][string]$CostFlag
+        [Parameter(Mandatory = $false)][string]$CostFlag,
+        [Parameter(Mandatory = $false)][bool]$CrossFamily = $false
     )
     $parts = New-Object 'System.Collections.Generic.List[string]'
+    $targetSku = if ($Row.PSObject.Properties.Match('CandidateTargetSku').Count -gt 0 -and $Row.CandidateTargetSku) { [string]$Row.CandidateTargetSku } else { 'N/A' }
+    if ($targetSku -eq 'N/A') {
+        # No compatible target survived selection. The upstream candidate-strategy basis (e.g. a
+        # cross-family attempt) describes an attempt that produced NO target, so echoing it here would
+        # contradict both the N/A outcome and the low-complexity wave. Report the honest no-target line.
+        return 'No compatible in-family or same-shape target found; keep the current SKU and monitor the roadmap.'
+    }
     $basis = if ($Row.PSObject.Properties.Match('RecommendationBasis').Count -gt 0 -and $Row.RecommendationBasis) { [string]$Row.RecommendationBasis } else { '' }
+    if (-not $CrossFamily -and $basis -match '(?i)\bcross-family migration\b') {
+        $basis = 'Heuristic: compatible same-family modernization (requires architecture validation)'
+    }
     if ($basis) { $parts.Add($basis) | Out-Null }
     if ($Row.PSObject.Properties.Match('GenerationChange').Count -gt 0 -and [bool]$Row.GenerationChange) {
         $parts.Add('Gen1->Gen2: not a simple resize - confirm the OS image is Gen2 (UEFI) and validate boot, drivers and extensions first.') | Out-Null
@@ -5496,22 +5742,198 @@ function Get-RemediationChecklist {
     return $list.ToArray()
 }
 
+function Test-MeaningfulChecklistEntry {
+    param([Parameter(Mandatory = $false)]$Value)
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $false }
+    $decoded = [System.Net.WebUtility]::HtmlDecode([string]$Value)
+    $plainText = [regex]::Replace($decoded, '<[^>]+>', '').Trim()
+    return -not [string]::IsNullOrWhiteSpace($plainText)
+}
+
+function Resolve-RemediationWaveFloor {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Critical', 'High', 'Medium', 'Watch')][string]$RiskLevel,
+        [Parameter(Mandatory = $false)][bool]$IsSensitiveWorkload = $false,
+        [Parameter(Mandatory = $false)][bool]$IsGenerationChange = $false,
+        [Parameter(Mandatory = $false)][bool]$IsCrossFamily = $false
+    )
+
+    if ($null -eq $script:WaveOrder -or $script:WaveOrder.Count -eq 0) {
+        throw 'Wave order is not initialized.'
+    }
+
+    $urgencyFloor = switch ($RiskLevel) {
+        'Critical' { 'W0' }
+        'High' { 'W1' }
+        default { 'W4' }
+    }
+
+    $complexityFloor = if ($IsCrossFamily -or $IsGenerationChange) { 'W3' }
+        elseif ($IsSensitiveWorkload) { 'W2' }
+        else { 'W4' }
+
+    $wave = if ([int]$script:WaveOrder[$urgencyFloor] -le [int]$script:WaveOrder[$complexityFloor]) { $urgencyFloor } else { $complexityFloor }
+
+    return [pscustomobject]@{
+        Wave            = $wave
+        WaveNumber      = [int]$script:WaveOrder[$wave]
+        UrgencyFloor    = $urgencyFloor
+        ComplexityFloor = $complexityFloor
+    }
+}
+
+function Resolve-RemediationWave {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Critical', 'High', 'Medium', 'Watch')][string]$RiskLevel,
+        [Parameter(Mandatory = $false)][bool]$IsSensitiveWorkload = $false,
+        [Parameter(Mandatory = $false)][string]$SensitiveReason = '',
+        [Parameter(Mandatory = $false)][bool]$IsGenerationChange = $false,
+        [Parameter(Mandatory = $false)][bool]$IsCrossFamily = $false,
+        [Parameter(Mandatory = $false)][bool]$AdvisorConfirmed = $false
+    )
+
+    $floor = Resolve-RemediationWaveFloor -RiskLevel $RiskLevel -IsSensitiveWorkload $IsSensitiveWorkload -IsGenerationChange $IsGenerationChange -IsCrossFamily $IsCrossFamily
+
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    switch ($RiskLevel) {
+        'Critical' { $reasons.Add('UrgencyCritical') | Out-Null }
+        'High' { $reasons.Add('UrgencyHigh') | Out-Null }
+        default { $reasons.Add("UrgencyNone($RiskLevel)") | Out-Null }
+    }
+    if ($IsCrossFamily) { $reasons.Add('ComplexityCrossFamily') | Out-Null }
+    if ($IsGenerationChange) { $reasons.Add('ComplexityGen1ToGen2') | Out-Null }
+    if ($IsSensitiveWorkload) {
+        $reason = if (-not [string]::IsNullOrWhiteSpace($SensitiveReason)) { $SensitiveReason } else { 'sensitive' }
+        $reasons.Add("Sensitive:$reason") | Out-Null
+    }
+    if ($AdvisorConfirmed) { $reasons.Add('AdvisorConfirmed') | Out-Null }
+
+    return [pscustomobject]@{
+        Wave            = $floor.Wave
+        WaveNumber      = $floor.WaveNumber
+        UrgencyFloor    = $floor.UrgencyFloor
+        ComplexityFloor = $floor.ComplexityFloor
+        RiskLevel       = $RiskLevel
+        ReasonCodes     = @($reasons.ToArray())
+    }
+}
+
+function Get-WaveChipLabel {
+    param([Parameter(Mandatory = $true)]$WaveResult)
+
+    switch ([string]$WaveResult.Wave) {
+        'W0' { return 'W0 · Time-critical' }
+        'W1' {
+            $reasonCodes = @($WaveResult.ReasonCodes)
+            $hasAdvisor = ($reasonCodes -contains 'AdvisorConfirmed')
+            $hasSensitive = @($reasonCodes | Where-Object { $_ -like 'Sensitive:*' }).Count -gt 0
+            if ($hasAdvisor -and $hasSensitive) { return 'W1 · Advisor + sensitive' }
+            if ($hasAdvisor) { return 'W1 · Advisor-confirmed' }
+            if ($hasSensitive) { return 'W1 · Sensitive, high urgency' }
+            return 'W1 · High urgency'
+        }
+        'W2' { return 'W2 · Sensitive validation' }
+        'W3' { return 'W3 · Architecture' }
+        default { return 'W4 · Low complexity' }
+    }
+}
+
+function Get-WaveCardHeader {
+    param(
+        [Parameter(Mandatory = $true)][int]$WaveNumber,
+        [Parameter(Mandatory = $false)][object[]]$Items = @(),
+        [Parameter(Mandatory = $false)][string]$DefaultTitle = '',
+        [Parameter(Mandatory = $false)][string]$DefaultNote = ''
+    )
+
+    $reasonCodes = New-Object 'System.Collections.Generic.List[string]'
+    $itemReasonSets = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($item in @($Items)) {
+        if ($null -eq $item -or $item.PSObject.Properties.Match('WaveReasons').Count -eq 0) { continue }
+        $itemReasons = @($item.WaveReasons | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($itemReasons.Count -gt 0) { $itemReasonSets.Add($itemReasons) | Out-Null }
+        foreach ($reason in @($item.WaveReasons)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$reason)) {
+                $reasonCodes.Add([string]$reason) | Out-Null
+            }
+        }
+    }
+
+    if ($WaveNumber -ne 3 -and $WaveNumber -ne 4) {
+        return [pscustomobject]@{ Title = $DefaultTitle; Note = $DefaultNote }
+    }
+
+    $hasCrossFamily = ($reasonCodes -contains 'ComplexityCrossFamily')
+    $hasGenerationChange = ($reasonCodes -contains 'ComplexityGen1ToGen2')
+    $itemReasonSetCount = $itemReasonSets.Count
+    $crossFamilyItemCount = @($itemReasonSets | Where-Object { @($_) -contains 'ComplexityCrossFamily' }).Count
+    $allItemsCrossFamily = ($itemReasonSetCount -gt 0 -and $crossFamilyItemCount -eq $itemReasonSetCount)
+
+    if ($WaveNumber -eq 4) {
+        $complexityReasonSets = @(
+            $itemReasonSets | ForEach-Object {
+                $complexityReasons = @($_ | Where-Object { [string]$_ -like 'Complexity*' } | Sort-Object -Unique)
+                if ($complexityReasons.Count -eq 0) { 'None' } else { $complexityReasons -join '|' }
+            } | Sort-Object -Unique
+        )
+        $moveShapeSets = @(
+            $Items | Where-Object { $_ } | ForEach-Object {
+                if ($_.PSObject.Properties.Match('TargetSku').Count -gt 0 -and [string]$_.TargetSku -eq 'N/A') { 'NoCompatibleTarget' }
+                elseif ($_.PSObject.Properties.Match('GenerationChange').Count -gt 0 -and [bool]$_.GenerationChange) { 'GenerationBoundary' }
+                elseif ($_.PSObject.Properties.Match('CrossFamily').Count -gt 0 -and [bool]$_.CrossFamily) { 'CrossFamily' }
+                else { 'SameGenerationResize' }
+            } | Sort-Object -Unique
+        )
+
+        if ($complexityReasonSets.Count -eq 1 -and $complexityReasonSets[0] -eq 'None' -and $moveShapeSets.Count -eq 1 -and $moveShapeSets[0] -eq 'SameGenerationResize') {
+            $title = 'Wave 4 - Low-complexity same-generation resize'
+            $note = 'Low-complexity quick wins with no architecture or generation-boundary reason code; validate normal resize runbook prerequisites.'
+        }
+        else {
+            $title = 'Wave 4 - Low-complexity moves (mixed)'
+            $note = 'Low-complexity catch-all with mixed move characteristics; validate each workload against its row-level reason codes before batching.'
+        }
+
+        return [pscustomobject]@{ Title = $title; Note = $note }
+    }
+
+    if ($allItemsCrossFamily) {
+        $title = 'Wave 3 - Cross-family Gen1->Gen2 (architecture validation)'
+        $note = 'Highest validation effort: class change; validate architecture, capacity and rollback path.'
+    }
+    elseif ($hasCrossFamily -and $hasGenerationChange) {
+        $title = 'Wave 3 - Architecture validation (Gen1->Gen2 / cross-family)'
+        $note = 'Highest validation effort: class change and generation boundary; validate architecture, image generation, capacity and rollback path.'
+    }
+    elseif ($hasGenerationChange) {
+        $title = 'Wave 3 - Same-family Gen1->Gen2 (generation boundary)'
+        $note = 'Highest validation effort: generation boundary; validate image generation, boot/runtime assumptions, extensions and rollback path.'
+    }
+    else {
+        $title = $DefaultTitle
+        $note = $DefaultNote
+    }
+
+    return [pscustomobject]@{ Title = $title; Note = $note }
+}
+
 function Build-RemediationPlan {
     <#
     .SYNOPSIS
     Deterministic remediation wave plan. Assigns each retirement-path VM to exactly one wave using
-    FIRST-MATCH rules (evaluation order matters), then attaches a rationale and a class checklist.
+    deterministic urgency and complexity floors, then attaches a rationale and a class checklist.
 
     .DESCRIPTION
-    First-match wave rules (evaluated top to bottom; the first that matches wins, so a row is never
-    double-counted):
-    Wave 0 - Urgent retirement deadline      : RetirementRiskLevel is Critical or High.
-    Wave 1 - Advisor-confirmed sensitive workloads : gate = LiveAdvisorArg AND SensitiveWorkload.
-    Wave 2 - Sensitive workload, same-generation resize : SensitiveWorkload AND NOT GenerationChange.
-    Wave 3 - Cross-family Gen1->Gen2        : GenerationChange AND cross-family.
+    Wave routing uses the most governed lane from two deterministic floors:
+    Wave 0 - Urgent retirement deadline      : RetirementRiskLevel is Critical.
+    Wave 1 - High urgency / governed validation : RetirementRiskLevel is High.
+    Wave 2 - Sensitive workload, same-generation resize : SensitiveWorkload when no higher urgency/complexity floor applies.
+    Wave 3 - Cross-family or Gen1->Gen2     : GenerationChange OR cross-family.
     Wave 4 - Low-complexity same-generation resize : everything else.
     Order resolves the tricky rows without double counting: an Advisor-confirmed sensitive DC lands in
-    Wave 1 (not Wave 3 even if it changes generation), and a High-risk row lands in Wave 0 (not Wave 3
+    Wave 1 (not Wave 3 even if it changes generation), and a Critical-risk row lands in Wave 0 (not Wave 3
     even if it is cross-family/gen-change). Operates only on retirement-path rows, so the wave counts
     sum to the retirement path total.
     #>
@@ -5527,8 +5949,8 @@ function Build-RemediationPlan {
     }
 
     $waveMeta = @(
-        [pscustomobject]@{ Number = 0; Title = 'Wave 0 - Urgent retirement deadline'; Note = 'Time-critical retirement path; schedule first.' }
-        [pscustomobject]@{ Number = 1; Title = 'Wave 1 - Advisor-confirmed sensitive workloads'; Note = 'Per-resource Advisor signals on delicate workloads.' }
+        [pscustomobject]@{ Number = 0; Title = 'Wave 0 - Critical retirement deadline'; Note = 'Critical retirement path (within the configured critical-day threshold); schedule first.' }
+        [pscustomobject]@{ Number = 1; Title = 'Wave 1 - High urgency / governed validation'; Note = 'High urgency retirement path, with Advisor/sensitive reason codes shown per workload when present.' }
         [pscustomobject]@{ Number = 2; Title = 'Wave 2 - Sensitive workload, same-generation resize'; Note = 'Lower technical change, but validation is still required for sensitive workloads.' }
         [pscustomobject]@{ Number = 3; Title = 'Wave 3 - Cross-family Gen1->Gen2 (needs architecture validation)'; Note = 'Highest validation effort: class change plus generation boundary.' }
         [pscustomobject]@{ Number = 4; Title = 'Wave 4 - Low-complexity same-generation resize'; Note = 'Low-complexity quick wins, often cost-negative.' }
@@ -5544,7 +5966,9 @@ function Build-RemediationPlan {
         $targetSku = if ($row.PSObject.Properties.Match('CandidateTargetSku').Count -gt 0 -and $row.CandidateTargetSku) { [string]$row.CandidateTargetSku } else { 'N/A' }
         $riskLevel = if ($row.PSObject.Properties.Match('RetirementRiskLevel').Count -gt 0) { [string]$row.RetirementRiskLevel } else { '' }
         $gate = if ($row.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$row.RetirementSourceGate } else { '' }
+        $es = if ($row.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$row.EvidenceSource } else { '' }
         $sensitive = ($row.PSObject.Properties.Match('SensitiveWorkload').Count -gt 0 -and [bool]$row.SensitiveWorkload)
+        $sensitiveReason = if ($row.PSObject.Properties.Match('WorkloadRole').Count -gt 0 -and $row.WorkloadRole) { [string]$row.WorkloadRole } else { '' }
         $genChange = ($row.PSObject.Properties.Match('GenerationChange').Count -gt 0 -and [bool]$row.GenerationChange)
         $crossFamily = ($targetSku -ne 'N/A' -and (Get-SkuFamilyToken $currentSku) -ne (Get-SkuFamilyToken $targetSku))
 
@@ -5562,14 +5986,11 @@ function Build-RemediationPlan {
 
         $costFlag = Get-RemediationCostFlag -CostDeltaPercent $pct -CrossFamily $crossFamily
 
-        # FIRST-MATCH wave assignment (order matters).
-        $wave = if ($riskLevel -in @('Critical', 'High')) { 0 }
-                elseif ($gate -eq 'LiveAdvisorArg' -and $sensitive) { 1 }
-                elseif ($sensitive -and -not $genChange) { 2 }
-                elseif ($genChange -and $crossFamily) { 3 }
-                else { 4 }
+        $advisorConfirmed = ($gate -eq 'LiveAdvisorArg' -or $es -eq 'AdvisorSignalOnly')
+        $waveResult = Resolve-RemediationWave -RiskLevel $riskLevel -IsSensitiveWorkload $sensitive -SensitiveReason $sensitiveReason -IsGenerationChange $genChange -IsCrossFamily $crossFamily -AdvisorConfirmed $advisorConfirmed
 
-        $item = [pscustomobject]@{
+        $r = [pscustomobject]@{
+            Wave           = [string]$waveResult.Wave
             VmName         = if ($row.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$row.VmName } else { '(unknown)' }
             CurrentSku     = $currentSku
             TargetSku      = $targetSku
@@ -5584,10 +6005,19 @@ function Build-RemediationPlan {
             CrossFamily    = $crossFamily
             GenerationChange = $genChange
             Sensitive      = $sensitive
-            Rationale      = Get-RemediationRationale -Row $row -CostFlag $costFlag
+            WaveReasons    = @($waveResult.ReasonCodes)
+            UrgencyFloor   = $waveResult.UrgencyFloor
+            ComplexityFloor = $waveResult.ComplexityFloor
+            WaveChipLabel  = Get-WaveChipLabel -WaveResult $waveResult
+            Rationale      = Get-RemediationRationale -Row $row -CostFlag $costFlag -CrossFamily $crossFamily
             Checklist      = @(Get-RemediationChecklist -Row $row -CrossFamily $crossFamily)
         }
-        $byWave[$wave].Add($item) | Out-Null
+        $expectedWave = Resolve-RemediationWaveFloor -RiskLevel $riskLevel -IsSensitiveWorkload $sensitive -IsGenerationChange $genChange -IsCrossFamily $crossFamily
+        if ($r.Wave -ne $expectedWave.Wave) {
+            throw "Wave invariant violated on $($r.VmName): $($r.Wave) != $($expectedWave.Wave) [$($r.WaveReasons -join ',')] facts risk=$riskLevel sensitive=$sensitive generationChange=$genChange crossFamily=$crossFamily"
+        }
+        $wave = [int]$script:WaveOrder[$r.Wave]
+        $byWave[$wave].Add($r) | Out-Null
     }
 
     $waves = foreach ($w in $waveMeta) {
@@ -5633,7 +6063,11 @@ function ConvertTo-RemediationPlanHtml {
             $retire = if ($it.RetirementDate -and $it.RetirementDate -ne 'N/A') { " &mdash; retires <strong>$(ConvertTo-PlanText $it.RetirementDate)</strong>" } else { '' }
             [void]$sb.Append("<li><strong>$(ConvertTo-PlanText $it.VmName)</strong> ($arrow, $(ConvertTo-PlanText $it.Region))$retire. <em>$(ConvertTo-PlanText $it.MoneyText)</em>")
             if ($it.Rationale) { [void]$sb.Append("<br/><span class=`"wave-rationale`">$(ConvertTo-PlanText $it.Rationale)</span>") }
-            $checks = @($it.Checklist)
+            $checks = @(
+                foreach ($check in @($it.Checklist)) {
+                    if (Test-MeaningfulChecklistEntry $check) { $check }
+                }
+            )
             if ($checks.Count -gt 0) {
                 [void]$sb.Append('<ul class="wave-checklist">')
                 foreach ($c in $checks) { [void]$sb.Append("<li>$(ConvertTo-PlanText $c)</li>") }
@@ -5741,6 +6175,7 @@ function ConvertTo-SimplifiedReportHtml {
     $monitoringCount = @($Facts.MonitoringRows).Count
     $genChangeCount = if ($Facts.PSObject.Properties.Match('SkuChangeWithGenChange').Count -gt 0) { [int]$Facts.SkuChangeWithGenChange } else { 0 }
     $noGenChangeCount = if ($Facts.PSObject.Properties.Match('SkuChangeWithoutGenChange').Count -gt 0) { [int]$Facts.SkuChangeWithoutGenChange } else { 0 }
+    $withheldChangeCount = if ($Facts.PSObject.Properties.Match('RecommendationWithheldCount').Count -gt 0) { [int]$Facts.RecommendationWithheldCount } else { 0 }
     $commitmentImpactCount = if ($Facts.PSObject.Properties.Match('CommitmentImpactCount').Count -gt 0) { [int]$Facts.CommitmentImpactCount } else { 0 }
 
     $batchPreviewRows = @()
@@ -5833,7 +6268,7 @@ function ConvertTo-SimplifiedReportHtml {
     function Get-WaveUrgency([object]$Number) {
         switch ([int]$Number) {
             0 { return 'Time-critical' }
-            1 { return 'Advisor + sensitive' }
+            1 { return 'High urgency' }
             2 { return 'Sensitive validation' }
             3 { return 'Architecture' }
             default { return 'Low complexity' }
@@ -5848,15 +6283,17 @@ function ConvertTo-SimplifiedReportHtml {
         $count = $items.Count
         $accentClass = Get-WaveCssClass $wave.Number
         $urgencyText = Get-WaveUrgency $wave.Number
-        [void]$timelineBuilder.Append("<article class='timeline-card $accentClass'><div class='timeline-top'><span class='wave-code'>W$($wave.Number)</span><span class='urgency'>$(ConvertTo-HtmlText $urgencyText)</span></div><div class='timeline-count'>$(ConvertTo-HtmlText $count)</div><div class='timeline-label'>$(ConvertTo-HtmlText $wave.Title)</div></article>")
+        $waveHeader = Get-WaveCardHeader -WaveNumber ([int]$wave.Number) -Items $items -DefaultTitle ([string]$wave.Title) -DefaultNote ([string]$wave.Note)
+        [void]$timelineBuilder.Append("<article class='timeline-card $accentClass'><div class='timeline-top'><span class='wave-code'>W$($wave.Number)</span><span class='urgency'>$(ConvertTo-HtmlText $urgencyText)</span></div><div class='timeline-count'>$(ConvertTo-HtmlText $count)</div><div class='timeline-label'>$(ConvertTo-HtmlText $waveHeader.Title)</div></article>")
 
         if ($count -eq 0) { continue }
         $openAttr = if ($wave.Number -le 1) { ' open' } else { '' }
-        [void]$waveBuilder.Append("<details class='wave-card $accentClass'$openAttr><summary><span class='wave-head'><span class='wave-code'>W$($wave.Number)</span> $(ConvertTo-HtmlText $wave.Title)</span><span class='wave-head-count'>$(ConvertTo-HtmlText $count) VM$(if ($count -ne 1) { 's' }) &middot; $(ConvertTo-HtmlText $urgencyText)</span></summary>")
-        [void]$waveBuilder.Append("<p class='wave-note'>$(ConvertTo-HtmlText $wave.Note)</p>")
+        [void]$waveBuilder.Append("<details class='wave-card $accentClass'$openAttr><summary><span class='wave-head'><span class='wave-code'>W$($wave.Number)</span> $(ConvertTo-HtmlText $waveHeader.Title)</span><span class='wave-head-count'>$(ConvertTo-HtmlText $count) VM$(if ($count -ne 1) { 's' }) &middot; $(ConvertTo-HtmlText $urgencyText)</span></summary>")
+        [void]$waveBuilder.Append("<p class='wave-note'>$(ConvertTo-HtmlText $waveHeader.Note)</p>")
         foreach ($it in $items) {
             if ($it.PSObject.Properties.Match('VmName').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$it.VmName)) {
-                $waveByVm[[string]$it.VmName] = [pscustomobject]@{ Number = [int]$wave.Number; Urgency = $urgencyText; CssClass = $accentClass }
+                $chipLabel = if ($it.PSObject.Properties.Match('WaveChipLabel').Count -gt 0 -and $it.WaveChipLabel) { [string]$it.WaveChipLabel } else { "W$($wave.Number) · $urgencyText" }
+                $waveByVm[[string]$it.VmName] = [pscustomobject]@{ Number = [int]$wave.Number; Urgency = $urgencyText; CssClass = $accentClass; ChipLabel = $chipLabel }
             }
             $pathText = if ($it.TargetSku -and $it.TargetSku -ne 'N/A') {
                 "$(ConvertTo-HtmlText $it.CurrentSku) &rarr; $(ConvertTo-HtmlText $it.TargetSku)"
@@ -5882,7 +6319,11 @@ function ConvertTo-SimplifiedReportHtml {
             if ($it.Rationale) {
                 [void]$waveBuilder.Append("<div class='wave-item-rationale'>$(ConvertTo-HtmlText $it.Rationale)</div>")
             }
-            $checks = @($it.Checklist | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $checks = @(
+                foreach ($check in @($it.Checklist)) {
+                    if (Test-MeaningfulChecklistEntry $check) { $check }
+                }
+            )
             if ($checks.Count -gt 0) {
                 [void]$waveBuilder.Append("<details class='mini'><summary>Checklist</summary><ul>")
                 foreach ($c in $checks) {
@@ -5905,8 +6346,8 @@ function ConvertTo-SimplifiedReportHtml {
     $w3Count = if ($waveCountByNumber.ContainsKey(3)) { [int]$waveCountByNumber[3] } else { 0 }
     $w4Count = if ($waveCountByNumber.ContainsKey(4)) { [int]$waveCountByNumber[4] } else { 0 }
 
-    $actNowCount = $w0Count + $w1Count
-    $planNowCount = $w2Count + $w3Count
+    $actNowCount = $w0Count
+    $planNowCount = $w1Count + $w2Count + $w3Count
     $quickWinCount = $w4Count
     $advisorConfidencePercent = if ([int]$Facts.RetireCount -gt 0) {
         [int][math]::Round(([double]$Facts.AdvisorConfirmed / [double]$Facts.RetireCount) * 100.0, 0)
@@ -6313,6 +6754,7 @@ ul { margin-top: 8px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .swatch-blue { background: #2563eb; }
 .swatch-red { background: #b91c1c; }
+.swatch-grey { background: #6b7280; }
 .money-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .money-cell { border: 1px solid #e2e8f0; border-radius: 9px; padding: 10px; background: #ffffff; }
 .money-label { color: #64748b; font-size: 11px; font-weight: 800; }
@@ -6351,8 +6793,8 @@ ul { margin-top: 8px; }
 <section class="legend-box">
 <h3>Wave model</h3>
 <dl>
-<div><dt>W0 Time-critical</dt><dd>Retirement risk is Critical/High. Calendar pressure wins over all other sequencing rules.</dd></div>
-<div><dt>W1 Advisor + sensitive</dt><dd>Advisor-confirmed VM on a sensitive workload. Use tighter change governance and validation.</dd></div>
+<div><dt>W0 Time-critical</dt><dd>Retirement risk is Critical. Calendar pressure wins over all other sequencing rules.</dd></div>
+<div><dt>W1 High urgency / governed validation</dt><dd>Retirement risk is High. Advisor and sensitive reason codes are shown on the individual workload badge only when those facts are present.</dd></div>
 <div><dt>W2 Sensitive validation</dt><dd>Sensitive workload with same-generation resize. Lower technical change, but still validate workload behavior.</dd></div>
 <div><dt>W3 Architecture</dt><dd>Cross-family Gen1&rarr;Gen2 path. Validate image, drivers, boot/runtime assumptions, capacity and performance profile.</dd></div>
 <div><dt>W4 Low complexity</dt><dd>Standard same-generation resize lane. Best candidate for runbook-driven batch remediation.</dd></div>
@@ -6443,14 +6885,14 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 <article class="decision-card">
 <div class="decision-tag">This sprint</div>
 <div class="decision-value">$(ConvertTo-HtmlText $actNowCount)</div>
-<div class="decision-title">Act now (W0 + W1)</div>
-<div class="decision-note">Time-critical or Advisor-confirmed sensitive workloads that should be prioritized in immediate change windows.</div>
+<div class="decision-title">Act now (W0)</div>
+<div class="decision-note">Critical retirement deadlines that should be prioritized in the current sprint.</div>
 </article>
 <article class="decision-card">
 <div class="decision-tag">Next wave</div>
 <div class="decision-value">$(ConvertTo-HtmlText $planNowCount)</div>
-<div class="decision-title">Plan with validation (W2 + W3)</div>
-<div class="decision-note">Workloads with moderate/high technical validation effort that need architecture and application checks before cutover.</div>
+<div class="decision-title">Plan with validation (W1 + W2 + W3)</div>
+<div class="decision-note">High urgency or higher-effort workloads that need planning and validation before cutover; Advisor/sensitive facts are shown per workload.</div>
 </article>
 <article class="decision-card">
 <div class="decision-tag">Quick wins</div>
@@ -6481,7 +6923,7 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 
 <section class="panel">
 <h2>Summary by Change Type</h2>
-<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div></div></div>
+<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div>$(if ($withheldChangeCount -gt 0) { "<div class='legend-row'><span class='legend-key'><span class='swatch swatch-grey'></span>Unclassified (no catalog target)</span><strong>$(ConvertTo-HtmlText $withheldChangeCount)</strong></div>" })</div></div>
 </section>
 
 <div class="content-grid">
@@ -6517,12 +6959,12 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 <article class="scenario-card">
 <h3>Conservative</h3>
 <div class="scenario-count">$(ConvertTo-HtmlText $actNowCount)</div>
-<p>Focus only on W0 + W1 to reduce near-term retirement exposure with controlled blast radius.</p>
+<p>Focus only on W0 to address critical retirement deadlines first.</p>
 </article>
 <article class="scenario-card">
 <h3>Balanced</h3>
-<div class="scenario-count">$(ConvertTo-HtmlText ($actNowCount + $w2Count))</div>
-<p>Execute W0 + W1 and start W2 in parallel to reduce backlog while keeping architectural risk bounded.</p>
+<div class="scenario-count">$(ConvertTo-HtmlText ($actNowCount + $w1Count + $w2Count))</div>
+<p>Execute W0 and prepare W1 + W2 in parallel while keeping architecture-heavy W3 work governed separately.</p>
 </article>
 <article class="scenario-card">
 <h3>Accelerated</h3>
@@ -6670,7 +7112,7 @@ $(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div cla
     foreach ($row in $finOpsRows) {
         $costText = "$(Format-ReportMoney $row.RetailDeltaMonthly)$(Format-ReportPercent $row.CostDeltaPercent)"
         $waveInfo = if ($waveByVm.ContainsKey([string]$row.VmName)) { $waveByVm[[string]$row.VmName] } else { $null }
-        $waveCell = if ($waveInfo) { "<span class='wave-badge $($waveInfo.CssClass)'>W$($waveInfo.Number) &middot; $(ConvertTo-HtmlText $waveInfo.Urgency)</span>" } else { "<span class='wave-badge'>Not assigned</span>" }
+        $waveCell = if ($waveInfo) { "<span class='wave-badge $($waveInfo.CssClass)'>$(ConvertTo-HtmlText $waveInfo.ChipLabel)</span>" } else { "<span class='wave-badge'>Not assigned</span>" }
         $priceBasis = if ($row.PSObject.Properties.Match('CurrentPriceOsBasis').Count -gt 0 -and $row.CurrentPriceOsBasis) { [string]$row.CurrentPriceOsBasis } else { 'N/A' }
         $basisLabel = switch ($priceBasis) {
             'Windows'             { 'Windows retail meter' }

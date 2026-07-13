@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.5`
+**Current version:** `v0.6`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -13,6 +13,7 @@
 - [Minimum Azure permissions](#minimum-azure-permissions)
 - [Command syntax](#command-syntax)
 - [Common runs](#common-runs)
+- [Review tests](#review-tests)
 - [How the script works](#how-the-script-works)
 - [HTML dashboard layout](#html-dashboard-layout)
 - [Cost impact on Reserved Instance / Savings Plan](#cost-impact-on-reserved-instance--savings-plan)
@@ -89,6 +90,19 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
 ## Changelog
 
 Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
+
+## Review tests
+
+The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
+recommendation safety, cost publication guards, backlog selection and external API contracts.
+
+Run it with Pester 5:
+
+```powershell
+Remove-Module Pester -ErrorAction SilentlyContinue
+Import-Module Pester -MinimumVersion 5.0 -Force
+Invoke-Pester .\review\AzureSkuModernizationReport.Review.Tests.ps1 -Output Detailed
+```
 
 ## Prerequisites
 
@@ -336,23 +350,26 @@ roadmap/planning context only: no direct reservation renewal action is implied b
 
 The HTML dashboard includes a **deterministic remediation wave plan** (`Build-RemediationPlan`) that
 assigns every retirement-path VM to exactly one wave, so the wave counts always sum to the retirement
-path total (an invariant enforced before the HTML is written). Assignment is **first-match** — the
-first rule that matches wins, so a VM is never double-counted:
+path total (an invariant enforced before the HTML is written). Assignment combines two independent
+floors and selects the lower wave number (the more urgent/governed lane):
 
-| Wave | Rule (first match wins) |
-|---|---|
-| **0 — Urgent retirement deadline** | `RetirementRiskLevel` is `Critical` or `High` |
-| **1 — Advisor-confirmed sensitive workloads** | source gate `LiveAdvisorArg` **and** `SensitiveWorkload` |
-| **2 — Sensitive workload, same-generation resize** | `SensitiveWorkload` **and not** `GenerationChange` |
-| **3 — Cross-family Gen1→Gen2** | `GenerationChange` **and** the target changes VM family |
-| **4 — Low-complexity same-generation resize** | everything else |
+| Axis | Facts | Floor |
+|---|---|---|
+| **Urgency** | `RetirementRiskLevel = Critical` | **W0** |
+| **Urgency** | `RetirementRiskLevel = High` | **W1** |
+| **Urgency** | `RetirementRiskLevel = Medium` or `Watch` | **W4** |
+| **Complexity** | `GenerationChange` or normalized cross-family move | **W3** |
+| **Complexity** | sensitive workload with no generation/cross-family boundary | **W2** |
+| **Complexity** | ordinary same-generation, same-family move | **W4** |
 
-Order matters and resolves the ambiguous rows without double counting: an Advisor-confirmed sensitive
-Domain Controller that also changes generation lands in **Wave 1** (not Wave 3), and a `High`-risk row
-lands in **Wave 0** (not Wave 3) even if it is cross-family. Each entry carries:
+For example, `High + Gen1->Gen2` resolves to `min(W1, W3) = W1`; a medium-risk sensitive Domain
+Controller that crosses the generation boundary resolves to `min(W4, W3) = W3`. W3 is the
+architecture-validation lane, not a statement that the workload is less delicate than W2. Reason
+codes retain every applicable fact, including sensitive workload role, even when another floor selects
+the final wave. Each entry carries:
 
-- a **rationale** built from the row's `RecommendationBasis` (e.g. *burstable continuity*, *cross-family
-  migration*, *same-shape refresh*), plus a Gen1→Gen2 caution when it applies;
+- a **rationale** aligned with the normalized same-family/cross-family fact while preserving the source
+  `RecommendationBasis` in structured data, plus a Gen1→Gen2 caution when it applies;
 - a deterministic **cost caveat** (`Get-RemediationCostFlag`): a delta above **+30%** that also crosses
   VM families is flagged as a *compute-class change* (e.g. burstable/basic → compute-optimized), **not**
   a pure price rise — validate the workload truly needs sustained CPU;
@@ -361,24 +378,11 @@ lands in **Wave 0** (not Wave 3) even if it is cross-family. Each entry carries:
 
 No AI is involved — the plan is a pure function of the report facts.
 
-### Worked example (9 retirement-path VMs)
-
-With the first-match rules above, this distribution is deterministic and mutually exclusive:
-
-- Wave 0: `1` VM (`test`) because risk is `High` (deadline < 24 months)
-- Wave 1: `1` VM (`ric-vm-dc`) because it is `LiveAdvisorArg` + sensitive
-- Wave 2: `2` VMs (`ric-vm-adcon`, `vm-adfs`) because they are sensitive and same-generation
-- Wave 3: `3` VMs (`ric-vm-0-lan1`, `ric-vm-0-lan2`, `ric-vm-1-lan1`) because they are cross-family Gen1->Gen2
-- Wave 4: `2` VMs (`contorsoclient`, `vm3-win-1`) because they fall in none of the earlier classes
-
-Result: `1 + 1 + 2 + 3 + 2 = 9`, which reconciles with the retirement path total.
-
-Two first-match edge cases are intentionally resolved by order:
-
-- `ric-vm-dc` is generation-changing and cross-family, but it stays in **Wave 1** (Advisor-confirmed + sensitive) and is not pushed to Wave 3.
-- `test` is cross-family and generation-changing, but it stays in **Wave 0** due to `High` urgency and is not pushed to Wave 3.
-
-This is why changing rule order changes outcomes.
+The fail-closed plan guard recomputes the expected floor from each row's raw facts before accepting its
+wave. The Pester review suite separately pins the full `4 x 2 x 2 x 2` risk/sensitive/generation/family
+matrix to literal expected floors, so a shared-helper defect cannot silently satisfy both routing and
+guard. Legacy Premium Storage names such as `DS2_v2` are normalized to their architectural family
+(`D`), keeping `DS2_v2 -> D2ads_v7` same-family while genuine moves such as `A -> F` remain cross-family.
 
 ## Coverage and disclaimer
 

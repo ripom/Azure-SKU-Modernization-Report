@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.6 - 2026-07-13
+
+- Replaced first-match remediation routing with deterministic urgency and complexity floors; the
+  lower wave number selects the final governed lane while all applicable reason codes remain visible.
+- Added a fail-closed remediation-plan invariant that recomputes the expected wave from raw row facts
+  before accepting wave counts.
+- Added a Pester 5 review suite with retirement-source, recommendation, cost, API-contract and report
+  checks, including a literal 32-case correctness matrix for `Resolve-RemediationWaveFloor`.
+- Made W3/W4 headers, wave chips, rationale and validation checklists derive from row-level facts and
+  reason codes; empty or HTML-only checklist entries are suppressed.
+- Normalized legacy Azure Premium Storage SKU names (`DS`/`GS`) for architectural family comparison,
+  so `DS2_v2 -> D2ads_v7` is same-family while genuine family changes remain cross-family.
+- Aligned the visible remediation rationale with the normalized family fact without rewriting the
+  source `RecommendationBasis` retained for audit and structured outputs.
+- Added explicit no-compatible-target presentation and an **Unclassified (no catalog target)** change
+  bucket so change-type totals reconcile with the retirement-path total without treating missing prices
+  as zero savings.
+- Hardened retirement-source parsing, recommendation compatibility, Windows/Linux retail meter checks,
+  delivery-readiness reconciliation and presentation encoding based on the new regression suite.
+- Documented how to run the Pester review suite and updated remediation-wave semantics for v0.6.
+
 ## v0.5 - 2026-07-13
 
 - Added Microsoft Release Communications RSS as Stream C official-communications context.
