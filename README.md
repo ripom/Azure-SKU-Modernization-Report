@@ -7,6 +7,21 @@
 > ([source HTML](examples/Azure-SKU-Modernization-Report-example.html)).
 > It shows the generated report experience without publishing real Azure resource names.
 
+## Quick navigation
+
+- [Prerequisites](#prerequisites)
+- [Minimum Azure permissions](#minimum-azure-permissions)
+- [Command syntax](#command-syntax)
+- [Common runs](#common-runs)
+- [How the script works](#how-the-script-works)
+- [HTML dashboard layout](#html-dashboard-layout)
+- [Cost impact on Reserved Instance / Savings Plan](#cost-impact-on-reserved-instance--savings-plan)
+- [Remediation wave plan](#remediation-wave-plan)
+- [Coverage and disclaimer](#coverage-and-disclaimer)
+- [Parameter reference](#parameter-reference)
+- [Generated outputs](#generated-outputs)
+- [Consistency guardians and delivery readiness](#consistency-guardians-and-delivery-readiness)
+
 Generates a fully deterministic Azure VM modernization report (SKU retirements, migration candidates,
 retail cost delta, readiness) including a fact-derived executive dashboard. Output: CSV, JSON
 and a scan-first HTML dashboard in `out/<timestamp>/`.
@@ -76,6 +91,43 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 - PowerShell 7+
 - Azure sign-in already completed (`Connect-AzAccount`)
 - Reader role on the analyzed subscriptions
+
+## Minimum Azure permissions
+
+The script is read-only. It does not resize VMs, change VMSS models, change Batch pools, create
+reservations, or modify Azure resources. The minimum practical permission is **Reader** on every
+subscription you want to analyze.
+
+Recommended assignment:
+
+| Scope | Minimum role | Why it is needed |
+| --- | --- | --- |
+| Each analyzed subscription | `Reader` | Lets the script enumerate VMs, VM Scale Sets, Batch accounts, Batch pools, Advisor recommendations, and Compute SKU availability through Azure Resource Graph and ARM read APIs. |
+| Management group containing the analyzed subscriptions | `Reader` | Optional convenience when you want the same read access inherited by many subscriptions. Use only if your governance model allows it. |
+| Individual resource group or resource | `Reader` | Works only for partial, resource-scoped visibility. Use this only when you intentionally want a limited report; subscription-level Reader is recommended for complete retirement and Advisor coverage. |
+
+In simple terms: assign `Reader` at the **subscription** scope for each subscription included in
+`-SubscriptionIds`. If you pass multiple subscriptions, the signed-in identity needs Reader on all of
+them. If you omit `-SubscriptionIds`, the script scans the enabled subscriptions visible to the current
+Azure context, so the output is only as complete as the subscriptions the identity can read.
+
+Data-source notes:
+
+- **VM inventory, VMSS inventory, Batch accounts and Batch pools:** require Azure read access on the
+  target resources. Subscription-level `Reader` is the safest minimal scope for complete inventory.
+- **Azure Advisor retirement signals:** require read access at the subscription scope to reliably see
+  subscription recommendations. If Advisor is unavailable or intentionally skipped with `-SkipAdvisor`,
+  the report can still use Microsoft Learn SKU-family retirement data, but it loses per-resource
+  Advisor confirmation.
+- **Compute Resource SKUs API:** uses ARM read access in one target subscription to understand regional
+  SKU availability and restrictions.
+- **Azure Retail Prices API and Microsoft Learn retirement data:** public sources; they do not require
+  tenant-specific Azure RBAC.
+
+No elevated roles such as `Contributor`, `Owner`, `Virtual Machine Contributor`, `Cost Management
+Reader`, or reservation administrator roles are required for the default report. The report estimates
+retail/list-price deltas and RI/SP signals from public pricing data; it does not read actual billing,
+reservation inventory, invoices, negotiated prices, or Cost Management data.
 
 ## Command syntax
 
