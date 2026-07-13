@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.2`
+**Current version:** `v0.3`
 
 Generates a fully deterministic Azure VM modernization report (SKU retirements, migration candidates,
 retail cost delta, readiness) including a fact-derived executive dashboard. Output: CSV, JSON
@@ -30,9 +30,32 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
 - **Presentation-only dashboard.** The HTML dashboard reads already-computed facts, remediation waves
   and provenance values. It does not reclassify rows or recompute retirement counts, cost deltas,
   wave assignments, evidence classes or SKU recommendations.
+- **Executive view shows total compute exposure.** Standalone VMs remain the main remediation and CSV
+  population, but the Executive Summary and Decision Room also surface Public Preview VMSS and Batch
+  retirement-path counts so the first screen shows total compute exposure at a glance.
+- **Preview remediation follows the resource model.** VMSS and Batch are not folded into standalone VM
+  waves. Instead, affected sidecar resources get a Public Preview remediation queue based on scale-set
+  model rollout and Batch pool replacement/drain patterns.
 - **Commitment impact flagged, not calculated.** When a SKU covered by a Reserved Instance or a
   Savings Plan is on a retirement path, the report raises a **warning** with the date ("when"),
   without quantifying the financial effect (effective RI/SP pricing is out of scope).
+- **Reserved Instance cutoff planning is Public Preview.** The report separately flags compute
+  resources whose VM size family is affected by the Reserved VM Instance new purchase/renewal cutoff
+  (`2026-07-01`). This is a FinOps planning signal, not a VM shutdown signal, and it does **not**
+  prove that an active reservation exists in the tenant. It does **not** change the VM retirement-path
+  count, CSV backlog or remediation wave totals.
+- **Azure Batch pool exposure is Public Preview.** Batch pools are separate Azure Batch resources that
+  use normal Azure VM sizes. The report can now scan `Microsoft.Batch/batchAccounts/pools`, match each
+  pool's `vmSize` against the same live VM-size retirement resolver, and show affected pools in a
+  separate preview section. Batch pool rows do **not** change the VM retirement-path count, CSV backlog
+  or remediation wave totals.
+- **VM Scale Set exposure is Public Preview.** VMSS resources are scanned separately from standalone
+  VMs. The report matches `Microsoft.Compute/virtualMachineScaleSets` `sku.name` values against the
+  same live VM-size retirement resolver and shows affected scale sets in a separate preview section.
+  VMSS rows do **not** change the VM retirement-path count, CSV backlog or remediation wave totals.
+- **Preview sidecars are non-blocking.** Batch, VMSS and RI cutoff sidecars are informational previews.
+  Empty inventories or missing optional resource types should produce zero preview rows and must not
+  block the standalone VM report, retirement source health checks or delivery gate.
 - **Delivery gate before publishing.** Before the HTML is written the report passes a layered set of
   consistency guardians and a final automated delivery-readiness gate (`Assert-DeliveryReady`) that
   re-verifies the run-time and post-run checks in one auditable place. Golden rule: if a number has no
@@ -41,26 +64,7 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
 
 ## Changelog
 
-### v0.2 - 2026-07-12
-
-- Reworked the HTML dashboard into a decision-oriented report with a **Decision Room**, risk-vs-effort
-  matrix, execution scenarios and an "If We Do Nothing" countdown.
-- Moved the CSA / Engineer detail table higher in the report and placed Remediation Plan plus
-  Monitoring Lifecycle near the end of the report flow.
-- Refined remediation wave labels for clearer execution semantics: time-critical, Advisor + sensitive,
-  sensitive validation, architecture and low complexity.
-- Added a closeable **Legend** overlay from the sidebar to explain core concepts, wave meanings,
-  decision sections, detail-table fields, cost caveats and validation expectations.
-- Added inline information icons/tooltips beside key KPIs and report sections.
-- Completed a conservative lint cleanup: ScriptAnalyzer warnings are clean while preserving report
-  facts, calculations, classification rules and output logic.
-
-### v0.1 - Initial baseline
-
-- Deterministic Azure SKU modernization report with CSV, JSON and self-contained HTML output.
-- LIVE-only retirement source model using Azure Advisor Resource Graph and Microsoft Learn markdown.
-- Separate monitoring lifecycle tracking for Dependency Agent / VM Insights Map signals.
-- Deterministic remediation wave plan and delivery-readiness consistency gates.
+Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 
 ## Prerequisites
 
@@ -68,7 +72,28 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
 - Azure sign-in already completed (`Connect-AzAccount`)
 - Reader role on the analyzed subscriptions
 
-## Basic run
+## Command syntax
+
+```powershell
+.\AzureSkuModernizationReport.ps1 `
+  [-SubscriptionIds <string[]>] `
+  [-TenantId <string>] `
+  [-Regions <string[]>] `
+  [-OutputRoot <string>] `
+  [-UseDeviceAuthentication] `
+  [-SkipAdvisor] `
+  [-SkipRetailApi] `
+  [-Currency <string>] `
+  [-RequireLiveRetirementSource <bool>] `
+  [-ForceRefreshCache]
+```
+
+All parameters are optional. With no region filter the script detects regions from the VM inventory.
+With no subscription filter it scans the enabled subscriptions available in the current tenant/context.
+
+## Common runs
+
+### Basic run
 
 ```powershell
 .\AzureSkuModernizationReport.ps1 `
@@ -79,44 +104,97 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
 Without any other parameters the script detects the regions from the inventory, uses the local cache
 when available, and produces CSV/JSON/HTML.
 
+### Multiple subscriptions
+
+```powershell
+.\AzureSkuModernizationReport.ps1 `
+  -TenantId "<tenant-id>" `
+  -SubscriptionIds @("<subscription-id-1>", "<subscription-id-2>")
+```
+
+### Limit analysis to specific regions
+
+```powershell
+.\AzureSkuModernizationReport.ps1 `
+  -SubscriptionIds "<subscription-id>" `
+  -Regions @("uksouth", "italynorth")
+```
+
+### Force fresh SKU/price data
+
+```powershell
+.\AzureSkuModernizationReport.ps1 `
+  -SubscriptionIds "<subscription-id>" `
+  -ForceRefreshCache
+```
+
+### Enforce live retirement-source availability
+
+```powershell
+.\AzureSkuModernizationReport.ps1 `
+  -SubscriptionIds "<subscription-id>" `
+  -RequireLiveRetirementSource $true
+```
+
+Use this mode when a report must not be produced if both live retirement sources are unavailable.
+
+## How the script works
+
+At a high level the script follows this deterministic pipeline:
+
+1. **Inventory:** reads standalone VMs from Azure Resource Graph. Public Preview sidecars also read
+  Azure Batch pools and VM Scale Sets as separate resource types.
+2. **Retirement sources:** loads live retirement signals from Azure Advisor Resource Graph and the
+  Microsoft Learn SKU-family source. Upgrade-only Advisor prompts without retirement dates are not
+  counted as retirements.
+3. **SKU and price catalog:** loads compute SKU metadata plus Retail Prices data, using local caches
+  when complete and fresh.
+4. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
+  quota/capacity and validation caveats.
+5. **Classification:** builds standalone VM retirement facts, remediation waves and sidecar previews
+  for Batch, VMSS and RI cutoff planning.
+6. **Validation gates:** checks source health, fact reconciliation, monitoring separation, OS-aware
+  pricing and delivery readiness before writing the report.
+7. **Output generation:** writes CSV, JSON, HTML and logs into the timestamped output folder.
+
+The HTML is a presentation layer over computed facts. It does not invent new counts or reclassify rows.
+
 ## HTML dashboard layout
 
 The HTML output is a self-contained dashboard designed for quick scanning and PDF export. It uses only
 inline CSS (no external CDN, JavaScript or font dependency) and renders the same facts that drive the
-CSV/JSON outputs.
+CSV/JSON outputs. The left sidebar contains a CSS-only section switcher; selecting a view changes the
+right-hand pane while the provenance/sidebar facts remain visible.
 
-Main sections:
+The layout is fluid: KPI cards, matrix cells, scenarios and cost panels use responsive grids that
+expand or collapse with the screen size. Wide operational tables are kept inside scrollable table
+containers so large datasets remain readable instead of forcing narrow columns.
 
-- **Fixed left sidebar:** report title, disclaimer, generated UTC, live source list, tenant/subscription
-  counts, freshness/live-source status and as-of date.
-- **Executive Summary band:** fact-derived bullets plus four KPI cards: retirement path,
-  Advisor-confirmed, SKU-family exposure and retail delta/month.
-- **Info strip:** nearest retirement deadline, SKU-change-vs-generation-change split, and RI/Savings
-  Plan impact flag.
-- **Report guide overlay:** **Legend** control below the sidebar as-of date that opens a closeable on-top guide explaining
-  core concepts, wave meanings, decision sections, detail-table fields, cost caveats and validation.
-- **Decision Room (90-day playbook):** a decision-oriented band with three priority lanes
-  (act now, plan with validation, quick wins) built from deterministic wave counts.
-- **Risk vs Effort Matrix:** 2x2 view mapping wave populations to execution lanes
-  (immediate, governed, engineering validation, quick wins).
-- **Execution Scenarios:** conservative, balanced and accelerated rollout views that reorder
-  priorities without changing underlying facts.
-- **If We Do Nothing:** dated retirement countdown list for escalation and planning.
-- **CSA / Engineer detail table:** per-VM rows with source, OS pricing basis, recommendation, validation,
-  next step and coloured wave badge.
-- **Summary by change type:** same-generation resize vs Gen1->Gen2 counts, read from the existing
-  fact split.
-- **Cost impact (monthly):** shows net retail delta. If future fact fields provide total increase and
-  total decrease, the dashboard will show those too; otherwise it deliberately omits that split.
-- **Remediation Plan (waves):** W0-W4 horizontal timeline cards and detailed wave panels. The same
-  semantic wave colours are reused in timeline cards and per-row badges: W0 red, W1 orange, W2 amber,
-  W3 blue, W4 green. Each state also carries a text label, so the report does not rely on colour alone.
-- **Monitoring Lifecycle panel:** visually detached from compute retirement and labelled as outside the
-  compute retirement count. Dependency Agent / VM Insights Map rows are tracked here only.
-- **Analysis Coverage and Provenance/Disclaimer footer.**
+Audience views:
 
-Print/PDF output uses a dedicated `@media print` stylesheet that expands details sections and lays the
-dashboard out sequentially so collapsed content is not hidden in exported PDFs.
+- **Executive Overview (CXO):** landing view with Executive Summary, KPI cards, info strip and
+  Decision Room. It keeps the big picture visible: total compute exposure, standalone VM wave counts,
+  VMSS/Batch preview count, nearest deadline, retail delta, RI cutoff planning and monitoring count.
+- **CSA / Engineer:** implementation detail for standalone VMs plus Public Preview sidecars. It
+  includes the per-VM CSA / Engineer table, Preview Remediation Queue for VMSS/Batch, Batch pool
+  exposure, VMSS exposure and Monitoring Lifecycle technical detail. The VM table is ordered by
+  remediation wave (`W0` to `W4`), then retirement date and VM name; cost columns are intentionally
+  excluded from this engineering view.
+- **Project Plan:** delivery view for PMs and migration leads. It contains Summary by Change Type,
+  Risk vs Effort Matrix, Execution Scenarios, If We Do Nothing deadline queue and the W0-W4
+  Remediation Plan wave panels.
+- **FinOps:** cost and commitment planning view. It contains Cost Impact (monthly), VM Cost Detail,
+  RI / Savings Plan flags and the compact Reserved Instance Cutoff Planning family summary. VM Cost
+  Detail follows remediation wave order (`W0` to `W4`), then retirement date and VM name.
+  Per-resource RI cutoff detail remains in CSV/JSON outputs.
+- **Coverage:** evidence and audit view with Analysis Coverage plus generated time, live-source
+  provenance, as-of date and disclaimer.
+
+The **Legend** control remains in the sidebar and opens a closeable guide explaining core concepts,
+wave meanings, decision sections, detail-table fields, cost caveats and validation expectations.
+
+Print/PDF output uses a dedicated `@media print` stylesheet that expands all audience views and detail
+sections sequentially so tabbed content is not hidden in exported PDFs.
 
 ### Provenance assembly
 
@@ -144,6 +222,22 @@ commitment is on a retirement path and raises a warning:
 - The dashboard shows the number of retiring VMs covered by a commitment (`CommitmentImpactCount`) in
   the info strip, pointing to the Validation column for the per-VM detail.
 - The financial effect is not quantified: it is an **attention flag**, not a number.
+
+Separately, the report includes a **Reserved Instance Cutoff Planning** Public Preview sidecar for the
+`2026-07-01` stop on new purchase/renewal of Reserved VM Instances for selected legacy families. This
+sidecar:
+
+- scans standalone VMs, Azure Batch pools and VM Scale Sets;
+- matches their normal Azure VM size field against the curated cutoff family list;
+- summarizes the HTML view by affected VM-size family and resource count; per-resource detail remains
+  in the structured CSV/JSON outputs;
+- flags both retirement-wave families and RI-cutoff-only families such as Dv3/Dsv3/Ev3/Esv3;
+- remains outside retirement counts, remediation waves, CSV backlog and cost calculations.
+
+It is a FinOps planning signal only. It does not prove that a real tenant reservation exists, does not
+read reservation inventory, does not calculate utilization/coverage/expiry, and does not imply VM
+shutdown. If the analyzed subscriptions have no active RI purchases, this section should be read as
+roadmap/planning context only: no direct reservation renewal action is implied by the report itself.
 
 ## Remediation wave plan
 
@@ -200,7 +294,10 @@ makes this explicit with a disclaimer banner (top and footer) and an **Analysis 
 
 - **What it covers:** Azure Advisor recommendations in the *Reliability &rarr; Service Upgrade and
   Retirement* subcategory, across all SKU families (no fixed list), with retirement date / retiring
-  feature when available, plus Microsoft Learn SKU-family exposures (Stream B).
+  feature when available, plus Microsoft Learn SKU-family exposures (Stream B). Public Preview: Azure
+  Batch pools and VM Scale Sets are scanned as separate resources and matched by their normal Azure VM
+  size fields (`vmSize` and `sku.name`); Reserved VM Instance cutoff planning is matched from a curated
+  FinOps family list.
 - **What it does NOT cover / manual verification required:**
   - Retirements present **only in Azure Service Health** (not emitted by Advisor) &mdash; check
     *Service Health &rarr; Health advisories* and the *Impacted Resources* tab.
@@ -253,8 +350,13 @@ default and effect.
 | `-RetailMaxParallelRequests` | `int` | `6` | Degree of parallelism for Retail requests (PS7+). |
 | `-RetailApiTimeoutSec` | `int` | `15` | Timeout (s) per single Retail request. |
 | `-UseResourceSkusRestApi` | `bool` | `$true` | Uses the Resource SKUs REST API for the catalog; with `$false` uses `Get-AzComputeResourceSku`. |
-| `-ResourceSkusApiVersion` | `string` | `2026-03-02` | API version for the Resource SKUs REST API. |
+| `-ResourceSkusApiVersion` | `string` | `2026-03-02` | Azure Resource Manager API contract version used only for `Microsoft.Compute/skus`. It is not a report as-of date, retirement cutoff date or RI cutoff date. |
 | `-IncludeExtendedLocationsInSkuApi` | `bool` | `$true` | Includes extended locations in the SKU catalog query. |
+
+Change `-ResourceSkusApiVersion` only if the Resource SKUs REST call fails because the selected API
+version is not supported in the target cloud/subscription, or if a newer Compute SKUs API version is
+needed for fields exposed by Azure. Changing it can affect SKU catalog shape, availability and
+restriction metadata, but it does not change retirement-source logic or remediation-wave rules.
 
 ### Retirement (LIVE-only)
 
@@ -282,17 +384,30 @@ default and effect.
 |---|---|---|---|
 | `-DetailedRunLog` | `bool` | `$true` | Logs the detailed `API_CALL|...` traces in the run log (more concise console, full file). |
 
-## Output
+## Generated outputs
 
-For each run in `out/<timestamp>/`:
+Each run creates a timestamped folder under `out/<timestamp>/` unless `-OutputRoot` is changed. The
+folder contains the human report, structured data files and audit logs for the same run.
 
-- `sku_modernization_report.csv`
-- `sku_modernization_report.json`
-- `sku_modernization_report.html`
-- `migration_backlog_items.csv`
-- `advisor_hints.json`
-- `api_calls_log.json` / `api_calls_log.csv`
-- `run_activity.log`
+| File | Primary audience | How to use it |
+|---|---|---|
+| `sku_modernization_report.html` | CXO, CSA/Engineer, PM, FinOps | Open in a browser. This is the main self-contained report with left-side audience views: Executive Overview, CSA / Engineer, Project Plan, FinOps and Coverage. Use it for review meetings and PDF export. |
+| `sku_modernization_report.csv` | CSA/Engineer, FinOps | Flat per-VM retirement-path dataset. Use in Excel/Power BI for filtering by VM, region, current SKU, recommended SKU, wave, cost delta and validation notes. |
+| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data. Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
+| `migration_backlog_items.csv` | PM, delivery lead | Work-item/backlog-friendly extract for remediation planning. Import into Azure DevOps, Planner, Jira or a spreadsheet to track owner, wave, target SKU and execution status. |
+| `advisor_hints.json` | CSA/Engineer, troubleshooting | Raw Advisor-related hints captured during analysis. Use to verify why a row was treated as Advisor-confirmed or to reconcile with Azure Advisor/Workbook views. |
+| `api_calls_log.csv` | Operations, audit | Tabular API-call trace with provider, request metadata and success/failure state. Use for quick filtering and evidence collection. |
+| `api_calls_log.json` | Automation, audit | Structured version of the API-call trace. Use when joining run telemetry with other logs or pipeline output. |
+| `run_activity.log` | Troubleshooting, delivery readiness | Human-readable execution log. Check source health, warnings, delivery-readiness gate output, cache usage and failure details. |
+
+Recommended consumption pattern:
+
+1. Open `sku_modernization_report.html` first and review the Executive Overview.
+2. Use the CSA / Engineer tab for implementation details and sidecar remediation.
+3. Use the Project Plan tab to sequence waves and create delivery work items.
+4. Use the FinOps tab plus `sku_modernization_report.csv` for cost and commitment review.
+5. Use Coverage and `run_activity.log` before sharing the report externally, especially if source
+  health is `WARN`.
 
 ## Notes
 

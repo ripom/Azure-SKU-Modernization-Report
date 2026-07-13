@@ -1420,6 +1420,425 @@ Resources
     return $inventory.ToArray()
 }
 
+function Get-ResourceGraphBatchPoolInventory {
+    param(
+        [Parameter(Mandatory = $false)][string[]]$Subscriptions
+    )
+
+    $query = @"
+Resources
+| where type =~ 'microsoft.batch/batchaccounts/pools'
+| extend idLower = tolower(id)
+| extend batchAccountName = tostring(extract('(?i)/batchAccounts/([^/]+)/pools/', 1, id))
+| extend poolName = tostring(extract('(?i)/pools/([^/]+)$', 1, id))
+| extend vmSize = tostring(properties.vmSize)
+| extend allocationState = tostring(properties.allocationState)
+| extend targetDedicatedNodes = tostring(properties.scaleSettings.fixedScale.targetDedicatedNodes)
+| extend targetLowPriorityNodes = tostring(properties.scaleSettings.fixedScale.targetLowPriorityNodes)
+| extend targetSpotNodes = tostring(properties.scaleSettings.fixedScale.targetSpotNodes)
+| extend currentDedicatedNodes = tostring(properties.currentDedicatedNodes)
+| extend currentLowPriorityNodes = tostring(properties.currentLowPriorityNodes)
+| project subscriptionId, resourceGroup, idLower, location, batchAccountName, poolName, vmSize, allocationState, targetDedicatedNodes, targetLowPriorityNodes, targetSpotNodes, currentDedicatedNodes, currentLowPriorityNodes
+"@
+
+    $subList = @($Subscriptions)
+    if (@($subList).Count -eq 0) {
+        $ctx = Get-AzContext -ErrorAction SilentlyContinue
+        if ($ctx -and $ctx.Subscription) {
+            $subList = @([string]$ctx.Subscription.Id)
+        }
+    }
+
+    $inventory = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($subId in $subList) {
+        $pageSize = 1000
+        $skipToken = $null
+        do {
+            $graphArgs = @{
+                Query        = $query
+                First        = $pageSize
+                Subscription = [string]$subId
+            }
+            if ($skipToken) {
+                $graphArgs['SkipToken'] = $skipToken
+            }
+
+            $searchStart = Get-Date
+            try {
+                $page = Search-AzGraph @graphArgs
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'BatchPoolsPublicPreview' -StartedAt $searchStart -EndedAt (Get-Date) -Success $true -Meta @{ ReturnedRows = @($page).Count }
+            }
+            catch {
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'BatchPoolsPublicPreview' -StartedAt $searchStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
+                Write-Log "Batch pool public preview inventory failed on subscription ${subId}: $($_.Exception.Message)" 'WARN'
+                break
+            }
+
+            foreach ($r in @($page)) {
+                $targetDedicated = if ($r.PSObject.Properties.Match('targetDedicatedNodes').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$r.targetDedicatedNodes)) { [string]$r.targetDedicatedNodes } else { 'N/A' }
+                $targetLowPriority = if ($r.PSObject.Properties.Match('targetLowPriorityNodes').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$r.targetLowPriorityNodes)) { [string]$r.targetLowPriorityNodes } else { 'N/A' }
+                $targetSpot = if ($r.PSObject.Properties.Match('targetSpotNodes').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$r.targetSpotNodes)) { [string]$r.targetSpotNodes } else { 'N/A' }
+                $inventory.Add([pscustomobject]@{
+                    ResourceId              = [string]$r.idLower
+                    SubscriptionId          = [string]$r.subscriptionId
+                    ResourceGroup           = [string]$r.resourceGroup
+                    BatchAccountName        = if ($r.PSObject.Properties.Match('batchAccountName').Count -gt 0 -and $r.batchAccountName) { [string]$r.batchAccountName } else { 'N/A' }
+                    PoolName                = if ($r.PSObject.Properties.Match('poolName').Count -gt 0 -and $r.poolName) { [string]$r.poolName } else { 'N/A' }
+                    Location                = ConvertTo-NormalizedLocation ([string]$r.location)
+                    VmSize                  = [string]$r.vmSize
+                    AllocationState         = if ($r.PSObject.Properties.Match('allocationState').Count -gt 0 -and $r.allocationState) { [string]$r.allocationState } else { 'N/A' }
+                    TargetDedicatedNodes    = $targetDedicated
+                    TargetLowPriorityNodes  = $targetLowPriority
+                    TargetSpotNodes         = $targetSpot
+                    CurrentDedicatedNodes   = if ($r.PSObject.Properties.Match('currentDedicatedNodes').Count -gt 0 -and $r.currentDedicatedNodes) { [string]$r.currentDedicatedNodes } else { 'N/A' }
+                    CurrentLowPriorityNodes = if ($r.PSObject.Properties.Match('currentLowPriorityNodes').Count -gt 0 -and $r.currentLowPriorityNodes) { [string]$r.currentLowPriorityNodes } else { 'N/A' }
+                }) | Out-Null
+            }
+            $skipToken = if ($page) { $page.SkipToken } else { $null }
+        } while ($skipToken)
+    }
+
+    return $inventory.ToArray()
+}
+
+function Build-BatchPoolRetirementPreview {
+    param(
+        [Parameter(Mandatory = $false)][object[]]$BatchPools = @(),
+        [Parameter(Mandatory = $false)]$Retirements
+    )
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $batchPoolItems = @($BatchPools | Where-Object { $null -ne $_ })
+    $liveSeries = @()
+    $advisorByResourceId = @{}
+    if ($Retirements) {
+        if ($Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
+            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+        }
+        if ($Retirements.PSObject.Properties.Match('ByVmResourceId').Count -gt 0 -and $Retirements.ByVmResourceId) {
+            $advisorByResourceId = $Retirements.ByVmResourceId
+        }
+    }
+
+    foreach ($pool in $batchPoolItems) {
+        $vmSize = if ($pool.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$pool.VmSize } else { '' }
+        if ([string]::IsNullOrWhiteSpace($vmSize)) { continue }
+
+        $resourceId = if ($pool.PSObject.Properties.Match('ResourceId').Count -gt 0) { ([string]$pool.ResourceId).ToLowerInvariant() } else { '' }
+        $advisorSignal = $null
+        if ($resourceId -and $advisorByResourceId.ContainsKey($resourceId)) {
+            $advisorSignal = $advisorByResourceId[$resourceId]
+        }
+
+        $officialRetirement = Resolve-OfficialRetirementLiveOnly -SkuName $vmSize -LiveLearnSeries $liveSeries
+        if (-not $advisorSignal -and -not $officialRetirement) { continue }
+
+        $retirementDate = if ($officialRetirement) { Format-NullableDate $officialRetirement.RetireOn } elseif ($advisorSignal) { Format-NullableDate $advisorSignal.RetireOn } else { 'N/A' }
+        $source = if ($officialRetirement -and $advisorSignal) { 'LiveLearnMarkdown + AdvisorSignal' } elseif ($officialRetirement) { 'LiveLearnMarkdown' } else { 'LiveAdvisorArg' }
+        $seriesName = if ($officialRetirement -and $officialRetirement.PSObject.Properties.Match('SeriesName').Count -gt 0) { [string]$officialRetirement.SeriesName } else { Convert-SkuToSeriesKey -SkuName $vmSize }
+
+        $rows.Add([pscustomobject]@{
+            ResourceType           = 'BatchPool'
+            Capability             = 'Public Preview'
+            SubscriptionId         = if ($pool.PSObject.Properties.Match('SubscriptionId').Count -gt 0) { [string]$pool.SubscriptionId } else { 'N/A' }
+            ResourceGroup          = if ($pool.PSObject.Properties.Match('ResourceGroup').Count -gt 0) { [string]$pool.ResourceGroup } else { 'N/A' }
+            BatchAccountName       = if ($pool.PSObject.Properties.Match('BatchAccountName').Count -gt 0) { [string]$pool.BatchAccountName } else { 'N/A' }
+            PoolName               = if ($pool.PSObject.Properties.Match('PoolName').Count -gt 0) { [string]$pool.PoolName } else { 'N/A' }
+            Region                 = if ($pool.PSObject.Properties.Match('Location').Count -gt 0) { [string]$pool.Location } else { 'N/A' }
+            CurrentSku             = $vmSize
+            SeriesName             = if ($seriesName) { [string]$seriesName } else { 'N/A' }
+            RetirementDate         = $retirementDate
+            EvidenceSource         = $source
+            AllocationState        = if ($pool.PSObject.Properties.Match('AllocationState').Count -gt 0) { [string]$pool.AllocationState } else { 'N/A' }
+            TargetDedicatedNodes   = if ($pool.PSObject.Properties.Match('TargetDedicatedNodes').Count -gt 0) { [string]$pool.TargetDedicatedNodes } else { 'N/A' }
+            TargetLowPriorityNodes = if ($pool.PSObject.Properties.Match('TargetLowPriorityNodes').Count -gt 0) { [string]$pool.TargetLowPriorityNodes } else { 'N/A' }
+            TargetSpotNodes        = if ($pool.PSObject.Properties.Match('TargetSpotNodes').Count -gt 0) { [string]$pool.TargetSpotNodes } else { 'N/A' }
+            NextStep               = 'Validate Batch pool VM size, image/node agent compatibility, quota and capacity; recreate or resize the pool with a supported VM size.'
+        }) | Out-Null
+    }
+
+    $previewRows = @($rows.ToArray() | Sort-Object RetirementDate, BatchAccountName, PoolName)
+    return [pscustomobject]@{
+        Capability             = 'Public Preview'
+        TotalBatchPoolsScanned = $batchPoolItems.Count
+        RetirementPathCount    = $previewRows.Count
+        Rows                   = $previewRows
+    }
+}
+
+function Get-ResourceGraphVmssInventory {
+    param(
+        [Parameter(Mandatory = $false)][string[]]$Subscriptions
+    )
+
+    $query = @"
+Resources
+| where type =~ 'microsoft.compute/virtualmachinescalesets'
+| extend idLower = tolower(id)
+| extend vmSize = tostring(sku.name)
+| extend capacity = tostring(sku.capacity)
+| extend skuTier = tostring(sku.tier)
+| extend orchestrationMode = tostring(properties.orchestrationMode)
+| extend upgradeMode = tostring(properties.upgradePolicy.mode)
+| extend provisioningState = tostring(properties.provisioningState)
+| extend osType = tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType)
+| project subscriptionId, resourceGroup, idLower, name, location, vmSize, capacity, skuTier, orchestrationMode, upgradeMode, provisioningState, osType
+"@
+
+    $subList = @($Subscriptions)
+    if (@($subList).Count -eq 0) {
+        $ctx = Get-AzContext -ErrorAction SilentlyContinue
+        if ($ctx -and $ctx.Subscription) {
+            $subList = @([string]$ctx.Subscription.Id)
+        }
+    }
+
+    $inventory = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($subId in $subList) {
+        $pageSize = 1000
+        $skipToken = $null
+        do {
+            $graphArgs = @{
+                Query        = $query
+                First        = $pageSize
+                Subscription = [string]$subId
+            }
+            if ($skipToken) {
+                $graphArgs['SkipToken'] = $skipToken
+            }
+
+            $searchStart = Get-Date
+            try {
+                $page = Search-AzGraph @graphArgs
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'VmssPublicPreview' -StartedAt $searchStart -EndedAt (Get-Date) -Success $true -Meta @{ ReturnedRows = @($page).Count }
+            }
+            catch {
+                Add-ApiCallLog -Api 'Search-AzGraph' -Provider 'Az.ResourceGraph' -TenantId $script:EffectiveTenantId -SubscriptionId ([string]$subId) -Request 'VmssPublicPreview' -StartedAt $searchStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
+                Write-Log "VMSS public preview inventory failed on subscription ${subId}: $($_.Exception.Message)" 'WARN'
+                break
+            }
+
+            foreach ($r in @($page)) {
+                $inventory.Add([pscustomobject]@{
+                    ResourceId         = [string]$r.idLower
+                    SubscriptionId     = [string]$r.subscriptionId
+                    ResourceGroup      = [string]$r.resourceGroup
+                    VmssName           = if ($r.PSObject.Properties.Match('name').Count -gt 0 -and $r.name) { [string]$r.name } else { 'N/A' }
+                    Location           = ConvertTo-NormalizedLocation ([string]$r.location)
+                    VmSize             = [string]$r.vmSize
+                    Capacity           = if ($r.PSObject.Properties.Match('capacity').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$r.capacity)) { [string]$r.capacity } else { 'N/A' }
+                    SkuTier            = if ($r.PSObject.Properties.Match('skuTier').Count -gt 0 -and $r.skuTier) { [string]$r.skuTier } else { 'N/A' }
+                    OrchestrationMode  = if ($r.PSObject.Properties.Match('orchestrationMode').Count -gt 0 -and $r.orchestrationMode) { [string]$r.orchestrationMode } else { 'N/A' }
+                    UpgradeMode        = if ($r.PSObject.Properties.Match('upgradeMode').Count -gt 0 -and $r.upgradeMode) { [string]$r.upgradeMode } else { 'N/A' }
+                    ProvisioningState  = if ($r.PSObject.Properties.Match('provisioningState').Count -gt 0 -and $r.provisioningState) { [string]$r.provisioningState } else { 'N/A' }
+                    OsType             = if ($r.PSObject.Properties.Match('osType').Count -gt 0 -and $r.osType) { [string]$r.osType } else { 'Unknown' }
+                }) | Out-Null
+            }
+            $skipToken = if ($page) { $page.SkipToken } else { $null }
+        } while ($skipToken)
+    }
+
+    return $inventory.ToArray()
+}
+
+function Build-VmssRetirementPreview {
+    param(
+        [Parameter(Mandatory = $false)][object[]]$VmScaleSets = @(),
+        [Parameter(Mandatory = $false)]$Retirements
+    )
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $vmssItems = @($VmScaleSets | Where-Object { $null -ne $_ })
+    $liveSeries = @()
+    $advisorByResourceId = @{}
+    if ($Retirements) {
+        if ($Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
+            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+        }
+        if ($Retirements.PSObject.Properties.Match('ByVmResourceId').Count -gt 0 -and $Retirements.ByVmResourceId) {
+            $advisorByResourceId = $Retirements.ByVmResourceId
+        }
+    }
+
+    foreach ($vmss in $vmssItems) {
+        $vmSize = if ($vmss.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$vmss.VmSize } else { '' }
+        if ([string]::IsNullOrWhiteSpace($vmSize)) { continue }
+
+        $resourceId = if ($vmss.PSObject.Properties.Match('ResourceId').Count -gt 0) { ([string]$vmss.ResourceId).ToLowerInvariant() } else { '' }
+        $advisorSignal = $null
+        if ($resourceId -and $advisorByResourceId.ContainsKey($resourceId)) {
+            $advisorSignal = $advisorByResourceId[$resourceId]
+        }
+
+        $officialRetirement = Resolve-OfficialRetirementLiveOnly -SkuName $vmSize -LiveLearnSeries $liveSeries
+        if (-not $advisorSignal -and -not $officialRetirement) { continue }
+
+        $retirementDate = if ($officialRetirement) { Format-NullableDate $officialRetirement.RetireOn } elseif ($advisorSignal) { Format-NullableDate $advisorSignal.RetireOn } else { 'N/A' }
+        $source = if ($officialRetirement -and $advisorSignal) { 'LiveLearnMarkdown + AdvisorSignal' } elseif ($officialRetirement) { 'LiveLearnMarkdown' } else { 'LiveAdvisorArg' }
+        $seriesName = if ($officialRetirement -and $officialRetirement.PSObject.Properties.Match('SeriesName').Count -gt 0) { [string]$officialRetirement.SeriesName } else { Convert-SkuToSeriesKey -SkuName $vmSize }
+
+        $rows.Add([pscustomobject]@{
+            ResourceType        = 'VirtualMachineScaleSet'
+            Capability          = 'Public Preview'
+            SubscriptionId      = if ($vmss.PSObject.Properties.Match('SubscriptionId').Count -gt 0) { [string]$vmss.SubscriptionId } else { 'N/A' }
+            ResourceGroup       = if ($vmss.PSObject.Properties.Match('ResourceGroup').Count -gt 0) { [string]$vmss.ResourceGroup } else { 'N/A' }
+            VmssName            = if ($vmss.PSObject.Properties.Match('VmssName').Count -gt 0) { [string]$vmss.VmssName } else { 'N/A' }
+            Region              = if ($vmss.PSObject.Properties.Match('Location').Count -gt 0) { [string]$vmss.Location } else { 'N/A' }
+            CurrentSku          = $vmSize
+            SeriesName          = if ($seriesName) { [string]$seriesName } else { 'N/A' }
+            RetirementDate      = $retirementDate
+            EvidenceSource      = $source
+            Capacity            = if ($vmss.PSObject.Properties.Match('Capacity').Count -gt 0) { [string]$vmss.Capacity } else { 'N/A' }
+            SkuTier             = if ($vmss.PSObject.Properties.Match('SkuTier').Count -gt 0) { [string]$vmss.SkuTier } else { 'N/A' }
+            OrchestrationMode   = if ($vmss.PSObject.Properties.Match('OrchestrationMode').Count -gt 0) { [string]$vmss.OrchestrationMode } else { 'N/A' }
+            UpgradeMode         = if ($vmss.PSObject.Properties.Match('UpgradeMode').Count -gt 0) { [string]$vmss.UpgradeMode } else { 'N/A' }
+            ProvisioningState   = if ($vmss.PSObject.Properties.Match('ProvisioningState').Count -gt 0) { [string]$vmss.ProvisioningState } else { 'N/A' }
+            OsType              = if ($vmss.PSObject.Properties.Match('OsType').Count -gt 0) { [string]$vmss.OsType } else { 'Unknown' }
+            NextStep            = 'Validate VMSS model, orchestration mode, image compatibility, capacity/quota and upgrade policy; roll to a supported VM size through a controlled scale set update.'
+        }) | Out-Null
+    }
+
+    $previewRows = @($rows.ToArray() | Sort-Object RetirementDate, VmssName)
+    return [pscustomobject]@{
+        Capability          = 'Public Preview'
+        TotalVmssScanned    = $vmssItems.Count
+        RetirementPathCount = $previewRows.Count
+        Rows                = $previewRows
+    }
+}
+
+function Convert-SkuToReservedInstanceCutoffFamily {
+    param([Parameter(Mandatory = $true)][string]$SkuName)
+
+    $normalized = ConvertTo-NormalizedSkuName $SkuName
+    $mapping = [ordered]@{
+        '^standard_ds\d+[a-z-]*_v3$'      = 'Dsv3-series'
+        '^standard_d\d+[a-z-]*_v3$'       = 'Dv3-series'
+        '^standard_es\d+[a-z-]*_v3$'      = 'Esv3-series'
+        '^standard_e\d+[a-z-]*_v3$'       = 'Ev3-series'
+        '^standard_ds\d+[a-z-]*_v2$'      = 'Dsv2-series'
+        '^standard_d\d+[a-z-]*_v2$'       = 'Dv2-series'
+        '^standard_ds\d+[a-z-]*(?!_v\d)$' = 'Ds-series'
+        '^standard_d\d+[a-z-]*(?!_v\d)$'  = 'D-series'
+        '^standard_l\d+[a-z-]*_v2$'       = 'Lsv2-series'
+        '^standard_l\d+[a-z-]*(?!_v\d)$'  = 'Ls-series'
+        '^standard_a\d+m?_v2$'            = 'Av2/Amv2-series'
+        '^standard_b\d+[a-z-]*$'          = 'B-series (V1)'
+        '^standard_fs\d+[a-z-]*_v2$'      = 'Fsv2-series'
+        '^standard_f\d+[a-z-]*_v2$'       = 'Fsv2-series'
+        '^standard_fs\d+[a-z-]*(?!_v\d)$' = 'Fs-series'
+        '^standard_f\d+[a-z-]*(?!_v\d)$'  = 'F-series'
+        '^standard_gs\d+[a-z-]*(?!_v\d)$' = 'Gs-series'
+        '^standard_g\d+[a-z-]*(?!_v\d)$'  = 'G-series'
+    }
+
+    foreach ($pattern in $mapping.Keys) {
+        if ($normalized -match $pattern) {
+            return $mapping[$pattern]
+        }
+    }
+
+    return $null
+}
+
+function Build-ReservedInstanceCutoffPreview {
+    param(
+        [Parameter(Mandatory = $false)][object[]]$VmRows = @(),
+        [Parameter(Mandatory = $false)][object[]]$BatchPools = @(),
+        [Parameter(Mandatory = $false)][object[]]$VmScaleSets = @(),
+        [Parameter(Mandatory = $false)]$Retirements
+    )
+
+    $cutoffDate = '2026-07-01'
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $vmItems = @($VmRows | Where-Object { $null -ne $_ })
+    $batchPoolItems = @($BatchPools | Where-Object { $null -ne $_ })
+    $vmssItems = @($VmScaleSets | Where-Object { $null -ne $_ })
+    $liveSeries = @()
+    if ($Retirements -and $Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
+        $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+    }
+
+    function Add-RiCutoffRow {
+        param(
+            [Parameter(Mandatory = $true)][string]$ResourceType,
+            [Parameter(Mandatory = $true)][string]$ResourceName,
+            [Parameter(Mandatory = $false)][string]$ParentResource,
+            [Parameter(Mandatory = $false)][string]$SubscriptionId,
+            [Parameter(Mandatory = $false)][string]$ResourceGroup,
+            [Parameter(Mandatory = $false)][string]$Region,
+            [Parameter(Mandatory = $true)][string]$CurrentSku,
+            [Parameter(Mandatory = $false)][string]$RetirementDate
+        )
+
+        if ([string]::IsNullOrWhiteSpace($CurrentSku)) { return }
+        $family = Convert-SkuToReservedInstanceCutoffFamily -SkuName $CurrentSku
+        if (-not $family) { return }
+
+        $resolvedRetirementDate = if (-not [string]::IsNullOrWhiteSpace($RetirementDate) -and $RetirementDate -ne 'N/A') { $RetirementDate } else { 'N/A' }
+        if ($resolvedRetirementDate -eq 'N/A') {
+            $officialRetirement = Resolve-OfficialRetirementLiveOnly -SkuName $CurrentSku -LiveLearnSeries $liveSeries
+            if ($officialRetirement) {
+                $resolvedRetirementDate = Format-NullableDate $officialRetirement.RetireOn
+            }
+        }
+
+        $rows.Add([pscustomobject]@{
+            ResourceType     = $ResourceType
+            ResourceName     = $ResourceName
+            ParentResource   = if ($ParentResource) { $ParentResource } else { 'N/A' }
+            SubscriptionId   = if ($SubscriptionId) { $SubscriptionId } else { 'N/A' }
+            ResourceGroup    = if ($ResourceGroup) { $ResourceGroup } else { 'N/A' }
+            Region           = if ($Region) { $Region } else { 'N/A' }
+            CurrentSku       = $CurrentSku
+            Family           = $family
+            CutoffDate       = $cutoffDate
+            RetirementDate   = $resolvedRetirementDate
+            Signal           = 'Reserved VM Instance new purchase/renewal cutoff'
+            Source           = 'Curated public announcement - verify in Microsoft commercial guidance'
+            Action           = 'FinOps planning: this row does not prove an active RI exists. If there is no RI estate for this scope, treat it as roadmap context only; otherwise review renewal plans, coverage/utilization and migration timing before the cutoff.'
+        }) | Out-Null
+    }
+
+    foreach ($vm in $vmItems) {
+        $sku = if ($vm.PSObject.Properties.Match('CurrentSku').Count -gt 0) { [string]$vm.CurrentSku } elseif ($vm.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$vm.VmSize } else { '' }
+        $resourceName = if ($vm.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$vm.VmName } else { 'N/A' }
+        $subscriptionId = if ($vm.PSObject.Properties.Match('SubscriptionId').Count -gt 0) { [string]$vm.SubscriptionId } else { 'N/A' }
+        $resourceGroup = if ($vm.PSObject.Properties.Match('ResourceGroup').Count -gt 0) { [string]$vm.ResourceGroup } else { 'N/A' }
+        $region = if ($vm.PSObject.Properties.Match('Region').Count -gt 0) { [string]$vm.Region } elseif ($vm.PSObject.Properties.Match('Location').Count -gt 0) { [string]$vm.Location } else { 'N/A' }
+        $retirementDate = if ($vm.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$vm.RetirementDate } else { 'N/A' }
+        Add-RiCutoffRow -ResourceType 'VirtualMachine' -ResourceName $resourceName -SubscriptionId $subscriptionId -ResourceGroup $resourceGroup -Region $region -CurrentSku $sku -RetirementDate $retirementDate
+    }
+
+    foreach ($pool in $batchPoolItems) {
+        $resourceName = if ($pool.PSObject.Properties.Match('PoolName').Count -gt 0) { [string]$pool.PoolName } else { 'N/A' }
+        $parentResource = if ($pool.PSObject.Properties.Match('BatchAccountName').Count -gt 0) { [string]$pool.BatchAccountName } else { 'N/A' }
+        $subscriptionId = if ($pool.PSObject.Properties.Match('SubscriptionId').Count -gt 0) { [string]$pool.SubscriptionId } else { 'N/A' }
+        $resourceGroup = if ($pool.PSObject.Properties.Match('ResourceGroup').Count -gt 0) { [string]$pool.ResourceGroup } else { 'N/A' }
+        $region = if ($pool.PSObject.Properties.Match('Location').Count -gt 0) { [string]$pool.Location } else { 'N/A' }
+        $sku = if ($pool.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$pool.VmSize } else { '' }
+        Add-RiCutoffRow -ResourceType 'BatchPool' -ResourceName $resourceName -ParentResource $parentResource -SubscriptionId $subscriptionId -ResourceGroup $resourceGroup -Region $region -CurrentSku $sku -RetirementDate 'N/A'
+    }
+
+    foreach ($vmss in $vmssItems) {
+        $resourceName = if ($vmss.PSObject.Properties.Match('VmssName').Count -gt 0) { [string]$vmss.VmssName } else { 'N/A' }
+        $subscriptionId = if ($vmss.PSObject.Properties.Match('SubscriptionId').Count -gt 0) { [string]$vmss.SubscriptionId } else { 'N/A' }
+        $resourceGroup = if ($vmss.PSObject.Properties.Match('ResourceGroup').Count -gt 0) { [string]$vmss.ResourceGroup } else { 'N/A' }
+        $region = if ($vmss.PSObject.Properties.Match('Location').Count -gt 0) { [string]$vmss.Location } else { 'N/A' }
+        $sku = if ($vmss.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$vmss.VmSize } else { '' }
+        Add-RiCutoffRow -ResourceType 'VirtualMachineScaleSet' -ResourceName $resourceName -SubscriptionId $subscriptionId -ResourceGroup $resourceGroup -Region $region -CurrentSku $sku -RetirementDate 'N/A'
+    }
+
+    $previewRows = @($rows.ToArray() | Sort-Object CutoffDate, ResourceType, Family, ResourceName)
+    return [pscustomobject]@{
+        Capability          = 'Public Preview'
+        CutoffDate          = $cutoffDate
+        TotalResourcesScanned = ($vmItems.Count + $batchPoolItems.Count + $vmssItems.Count)
+        ImpactCount         = $previewRows.Count
+        Rows                = $previewRows
+    }
+}
+
 function Get-ComputeSkuCatalog {
     param(
         [Parameter(Mandatory = $false)][string[]]$RegionsFilter,
@@ -4835,6 +5254,9 @@ function ConvertTo-SimplifiedReportHtml {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $false)]$RemediationPlan,
         [Parameter(Mandatory = $false)]$Provenance,
+        [Parameter(Mandatory = $false)]$BatchPoolPreview,
+        [Parameter(Mandatory = $false)]$VmssPreview,
+        [Parameter(Mandatory = $false)]$ReservedInstanceCutoffPreview,
         [Parameter(Mandatory = $false)][string]$ExecutiveNarrativeText
     )
 
@@ -4871,6 +5293,33 @@ function ConvertTo-SimplifiedReportHtml {
     $noGenChangeCount = if ($Facts.PSObject.Properties.Match('SkuChangeWithoutGenChange').Count -gt 0) { [int]$Facts.SkuChangeWithoutGenChange } else { 0 }
     $commitmentImpactCount = if ($Facts.PSObject.Properties.Match('CommitmentImpactCount').Count -gt 0) { [int]$Facts.CommitmentImpactCount } else { 0 }
 
+    $batchPreviewRows = @()
+    $batchPreviewScanned = 0
+    if ($BatchPoolPreview) {
+        if ($BatchPoolPreview.PSObject.Properties.Match('Rows').Count -gt 0) { $batchPreviewRows = @($BatchPoolPreview.Rows) }
+        if ($BatchPoolPreview.PSObject.Properties.Match('TotalBatchPoolsScanned').Count -gt 0) { $batchPreviewScanned = [int]$BatchPoolPreview.TotalBatchPoolsScanned }
+    }
+
+    $vmssPreviewRows = @()
+    $vmssPreviewScanned = 0
+    if ($VmssPreview) {
+        if ($VmssPreview.PSObject.Properties.Match('Rows').Count -gt 0) { $vmssPreviewRows = @($VmssPreview.Rows) }
+        if ($VmssPreview.PSObject.Properties.Match('TotalVmssScanned').Count -gt 0) { $vmssPreviewScanned = [int]$VmssPreview.TotalVmssScanned }
+    }
+
+    $riCutoffRows = @()
+    $riCutoffScanned = 0
+    $riCutoffDate = '2026-07-01'
+    if ($ReservedInstanceCutoffPreview) {
+        if ($ReservedInstanceCutoffPreview.PSObject.Properties.Match('Rows').Count -gt 0) { $riCutoffRows = @($ReservedInstanceCutoffPreview.Rows) }
+        if ($ReservedInstanceCutoffPreview.PSObject.Properties.Match('TotalResourcesScanned').Count -gt 0) { $riCutoffScanned = [int]$ReservedInstanceCutoffPreview.TotalResourcesScanned }
+        if ($ReservedInstanceCutoffPreview.PSObject.Properties.Match('CutoffDate').Count -gt 0 -and $ReservedInstanceCutoffPreview.CutoffDate) { $riCutoffDate = [string]$ReservedInstanceCutoffPreview.CutoffDate }
+    }
+
+    $sidecarRetirementCount = $batchPreviewRows.Count + $vmssPreviewRows.Count
+    $computeRetirementCount = [int]$Facts.RetireCount + $sidecarRetirementCount
+    $computeScannedCount = [int]$Facts.TotalVmCount + $batchPreviewScanned + $vmssPreviewScanned
+
     $generatedUtc = if ($Provenance -and $Provenance.PSObject.Properties.Match('GeneratedUtc').Count -gt 0) { [string]$Provenance.GeneratedUtc } else { [string]$Facts.GeneratedAtUtc }
     $tenantCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('TenantCount').Count -gt 0) { [string]$Provenance.TenantCount } else { '' }
     $subscriptionCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('SubscriptionCount').Count -gt 0) { [string]$Provenance.SubscriptionCount } else { '' }
@@ -4900,7 +5349,7 @@ function ConvertTo-SimplifiedReportHtml {
         $liveCoverage = 'live sources ok'
     }
 
-    $statusLine = "$(ConvertTo-HtmlText $Facts.RetireCount)/$(ConvertTo-HtmlText $Facts.TotalVmCount) on retirement path | $(ConvertTo-HtmlText $costImpactCompact) | nearest deadline $(ConvertTo-HtmlText $deadlineText) | $(ConvertTo-HtmlText $liveCoverage)"
+    $statusLine = "$(ConvertTo-HtmlText $computeRetirementCount)/$(ConvertTo-HtmlText $computeScannedCount) compute resources on retirement path | VM $(ConvertTo-HtmlText $Facts.RetireCount), VMSS $(ConvertTo-HtmlText $vmssPreviewRows.Count), Batch $(ConvertTo-HtmlText $batchPreviewRows.Count) | $(ConvertTo-HtmlText $costImpactCompact) | nearest deadline $(ConvertTo-HtmlText $deadlineText)"
 
     function Get-WaveCssClass([object]$Number) {
         return ('w{0}' -f [int]$Number)
@@ -5041,6 +5490,144 @@ function ConvertTo-SimplifiedReportHtml {
         $monitoringTableHtml = $monitoringTable.ToString()
     }
 
+    $batchPoolPreviewHtml = ''
+
+    if ($batchPreviewScanned -gt 0 -or $batchPreviewRows.Count -gt 0) {
+        $batchBuilder = New-Object 'System.Text.StringBuilder'
+        [void]$batchBuilder.Append("<section class='panel preview-panel'><h2>Azure Batch Pool Exposure <span class='tag tag-preview'>Public Preview</span></h2>")
+        [void]$batchBuilder.Append("<p class='meta'>Batch pools are separate Azure Batch resources that use normal Azure VM sizes. This preview reuses the same VM-size retirement resolver, but keeps Batch out of the VM retirement totals.</p>")
+        [void]$batchBuilder.Append("<div class='kpis preview-kpis'><div class='kpi'><div class='kpi-label'>Batch pools scanned</div><div class='kpi-value'>$(ConvertTo-HtmlText $batchPreviewScanned)</div></div><div class='kpi'><div class='kpi-label'>On retirement path</div><div class='kpi-value'>$(ConvertTo-HtmlText $batchPreviewRows.Count)</div></div></div>")
+        if ($batchPreviewRows.Count -gt 0) {
+            [void]$batchBuilder.Append("<div class='table-wrap'><table><thead><tr><th>Batch account / pool</th><th>VM size</th><th>Retirement</th><th>Pool capacity</th><th>Action</th></tr></thead><tbody>")
+            foreach ($batchRow in $batchPreviewRows) {
+                $poolLabel = "$(ConvertTo-HtmlText $batchRow.BatchAccountName)<br/><strong>$(ConvertTo-HtmlText $batchRow.PoolName)</strong><br/><span class='meta'>$(ConvertTo-HtmlText $batchRow.Region)</span>"
+                $capacityText = "Dedicated target: $(ConvertTo-HtmlText $batchRow.TargetDedicatedNodes)<br/>Low priority target: $(ConvertTo-HtmlText $batchRow.TargetLowPriorityNodes)<br/>Spot target: $(ConvertTo-HtmlText $batchRow.TargetSpotNodes)<br/><span class='meta'>State: $(ConvertTo-HtmlText $batchRow.AllocationState)</span>"
+                [void]$batchBuilder.Append("<tr><td>$poolLabel</td><td>$(ConvertTo-HtmlText $batchRow.CurrentSku)<br/><span class='meta'>$(ConvertTo-HtmlText $batchRow.SeriesName)</span></td><td><span class='tag tag-learn'>$(ConvertTo-HtmlText $batchRow.EvidenceSource)</span><br/><span class='meta'>Date: $(ConvertTo-HtmlText $batchRow.RetirementDate)</span></td><td>$capacityText</td><td>$(ConvertTo-HtmlText $batchRow.NextStep)</td></tr>")
+            }
+            [void]$batchBuilder.Append('</tbody></table></div>')
+        }
+        else {
+            [void]$batchBuilder.Append('<p class="meta">No Batch pool VM sizes matched the current retirement path in this scope.</p>')
+        }
+        [void]$batchBuilder.Append('</section>')
+        $batchPoolPreviewHtml = $batchBuilder.ToString()
+    }
+
+    $vmssPreviewHtml = ''
+
+    if ($vmssPreviewScanned -gt 0 -or $vmssPreviewRows.Count -gt 0) {
+        $vmssBuilder = New-Object 'System.Text.StringBuilder'
+        [void]$vmssBuilder.Append("<section class='panel preview-panel'><h2>Virtual Machine Scale Set Exposure <span class='tag tag-preview'>Public Preview</span></h2>")
+        [void]$vmssBuilder.Append("<p class='meta'>VM Scale Sets are separate compute resources that use normal Azure VM sizes. This preview matches VMSS <code>sku.name</code> against the same live VM-size retirement resolver, but keeps VMSS out of the VM retirement totals.</p>")
+        [void]$vmssBuilder.Append("<div class='kpis preview-kpis'><div class='kpi'><div class='kpi-label'>VMSS scanned</div><div class='kpi-value'>$(ConvertTo-HtmlText $vmssPreviewScanned)</div></div><div class='kpi'><div class='kpi-label'>On retirement path</div><div class='kpi-value'>$(ConvertTo-HtmlText $vmssPreviewRows.Count)</div></div></div>")
+        if ($vmssPreviewRows.Count -gt 0) {
+            [void]$vmssBuilder.Append("<div class='table-wrap'><table><thead><tr><th>Scale set</th><th>VM size</th><th>Retirement</th><th>Scale set model</th><th>Action</th></tr></thead><tbody>")
+            foreach ($vmssRow in $vmssPreviewRows) {
+                $vmssLabel = "<strong>$(ConvertTo-HtmlText $vmssRow.VmssName)</strong><br/><span class='meta'>$(ConvertTo-HtmlText $vmssRow.Region)</span>"
+                $modelText = "Capacity: $(ConvertTo-HtmlText $vmssRow.Capacity)<br/>Orchestration: $(ConvertTo-HtmlText $vmssRow.OrchestrationMode)<br/>Upgrade: $(ConvertTo-HtmlText $vmssRow.UpgradeMode)<br/><span class='meta'>OS: $(ConvertTo-HtmlText $vmssRow.OsType) &middot; State: $(ConvertTo-HtmlText $vmssRow.ProvisioningState)</span>"
+                [void]$vmssBuilder.Append("<tr><td>$vmssLabel</td><td>$(ConvertTo-HtmlText $vmssRow.CurrentSku)<br/><span class='meta'>$(ConvertTo-HtmlText $vmssRow.SeriesName)</span></td><td><span class='tag tag-learn'>$(ConvertTo-HtmlText $vmssRow.EvidenceSource)</span><br/><span class='meta'>Date: $(ConvertTo-HtmlText $vmssRow.RetirementDate)</span></td><td>$modelText</td><td>$(ConvertTo-HtmlText $vmssRow.NextStep)</td></tr>")
+            }
+            [void]$vmssBuilder.Append('</tbody></table></div>')
+        }
+        else {
+            [void]$vmssBuilder.Append('<p class="meta">No VM Scale Set VM sizes matched the current retirement path in this scope.</p>')
+        }
+        [void]$vmssBuilder.Append('</section>')
+        $vmssPreviewHtml = $vmssBuilder.ToString()
+    }
+
+    $previewRemediationHtml = ''
+    if ($sidecarRetirementCount -gt 0) {
+        $previewRemediationBuilder = New-Object 'System.Text.StringBuilder'
+        [void]$previewRemediationBuilder.Append("<section class='panel preview-panel'><h2>Preview Remediation Queue - VMSS and Batch <span class='tag tag-preview'>Public Preview</span></h2>")
+        [void]$previewRemediationBuilder.Append("<p class='meta'>Operational remediation queue for preview sidecars. These resources are visible in executive totals, but remain outside standalone VM waves because VMSS and Batch require model-level rollout and pool-level replacement patterns.</p>")
+        [void]$previewRemediationBuilder.Append("<div class='table-wrap'><table><thead><tr><th>Priority</th><th>Resource</th><th>Operational model</th><th>Remediation pattern</th><th>Guardrails</th></tr></thead><tbody>")
+
+        $previewQueueRows = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($vmssRow in $vmssPreviewRows) {
+            $dateText = if ($vmssRow.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$vmssRow.RetirementDate } else { 'N/A' }
+            $parsedDate = [datetime]::MaxValue
+            $hasDate = [datetime]::TryParse($dateText, [ref]$parsedDate)
+            $upgradeMode = if ($vmssRow.PSObject.Properties.Match('UpgradeMode').Count -gt 0 -and $vmssRow.UpgradeMode) { [string]$vmssRow.UpgradeMode } else { 'N/A' }
+            $orchestrationMode = if ($vmssRow.PSObject.Properties.Match('OrchestrationMode').Count -gt 0 -and $vmssRow.OrchestrationMode) { [string]$vmssRow.OrchestrationMode } else { 'N/A' }
+            $vmssAction = switch -Regex ($upgradeMode) {
+                'Manual' { 'Update the scale set model to a supported VM size, then roll instances in controlled batches using planned upgrade/reimage windows.'; break }
+                'Rolling|Automatic' { 'Update the scale set model to a supported VM size and use the configured upgrade policy for a staged rollout.'; break }
+                default { 'Update the scale set model to a supported VM size and choose a controlled rollout method before changing production capacity.' }
+            }
+            $previewQueueRows.Add([pscustomobject]@{
+                    SortDate    = if ($hasDate) { $parsedDate } else { [datetime]::MaxValue }
+                    SortType    = 0
+                    SortName    = [string]$vmssRow.VmssName
+                    Priority    = if ($hasDate) { $dateText } else { 'Date n/a' }
+                    Resource    = "<strong>$(ConvertTo-HtmlText $vmssRow.VmssName)</strong><br/><span class='meta'>VMSS &middot; $(ConvertTo-HtmlText $vmssRow.Region)</span>"
+                    Model       = "SKU: $(ConvertTo-HtmlText $vmssRow.CurrentSku)<br/>Capacity: $(ConvertTo-HtmlText $vmssRow.Capacity)<br/><span class='meta'>Orchestration: $(ConvertTo-HtmlText $orchestrationMode) &middot; Upgrade: $(ConvertTo-HtmlText $upgradeMode)</span>"
+                    Pattern     = $vmssAction
+                    Guardrails  = 'Validate image generation, extensions, health probes, autoscale rules, regional quota/capacity and rollback path before applying the model update.'
+                }) | Out-Null
+        }
+
+        foreach ($batchRow in $batchPreviewRows) {
+            $dateText = if ($batchRow.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$batchRow.RetirementDate } else { 'N/A' }
+            $parsedDate = [datetime]::MaxValue
+            $hasDate = [datetime]::TryParse($dateText, [ref]$parsedDate)
+            $allocationState = if ($batchRow.PSObject.Properties.Match('AllocationState').Count -gt 0 -and $batchRow.AllocationState) { [string]$batchRow.AllocationState } else { 'N/A' }
+            $previewQueueRows.Add([pscustomobject]@{
+                    SortDate    = if ($hasDate) { $parsedDate } else { [datetime]::MaxValue }
+                    SortType    = 1
+                    SortName    = "$(ConvertTo-HtmlText $batchRow.BatchAccountName)/$(ConvertTo-HtmlText $batchRow.PoolName)"
+                    Priority    = if ($hasDate) { $dateText } else { 'Date n/a' }
+                    Resource    = "$(ConvertTo-HtmlText $batchRow.BatchAccountName)<br/><strong>$(ConvertTo-HtmlText $batchRow.PoolName)</strong><br/><span class='meta'>Batch pool &middot; $(ConvertTo-HtmlText $batchRow.Region)</span>"
+                    Model       = "SKU: $(ConvertTo-HtmlText $batchRow.CurrentSku)<br/>Dedicated: $(ConvertTo-HtmlText $batchRow.TargetDedicatedNodes) &middot; Low priority: $(ConvertTo-HtmlText $batchRow.TargetLowPriorityNodes) &middot; Spot: $(ConvertTo-HtmlText $batchRow.TargetSpotNodes)<br/><span class='meta'>Allocation: $(ConvertTo-HtmlText $allocationState)</span>"
+                    Pattern     = 'Create a replacement pool with a supported VM size and compatible image/node agent, validate autoscale and quotas, drain running work, then move schedules/jobs to the new pool.'
+                    Guardrails  = 'Preserve job scheduling windows, task dependencies, application packages, certificates/identity, networking and pool start-task behavior before deleting the old pool.'
+                }) | Out-Null
+        }
+
+        foreach ($queueRow in @($previewQueueRows.ToArray() | Sort-Object SortDate, SortType, SortName)) {
+            [void]$previewRemediationBuilder.Append("<tr><td><span class='tag tag-learn'>$(ConvertTo-HtmlText $queueRow.Priority)</span></td><td>$($queueRow.Resource)</td><td>$($queueRow.Model)</td><td>$(ConvertTo-HtmlText $queueRow.Pattern)</td><td>$(ConvertTo-HtmlText $queueRow.Guardrails)</td></tr>")
+        }
+
+        [void]$previewRemediationBuilder.Append('</tbody></table></div></section>')
+        $previewRemediationHtml = $previewRemediationBuilder.ToString()
+    }
+
+    $riCutoffPreviewHtml = ''
+
+    if ($riCutoffScanned -gt 0 -or $riCutoffRows.Count -gt 0) {
+        $riBuilder = New-Object 'System.Text.StringBuilder'
+        [void]$riBuilder.Append("<section class='panel finops-panel'><h2>Reserved Instance Cutoff Planning <span class='tag tag-preview'>Public Preview</span></h2>")
+        [void]$riBuilder.Append("<p class='meta'>FinOps sidecar: new purchase and renewal of Reserved VM Instances stops on $(ConvertTo-HtmlText $riCutoffDate) for selected legacy VM families. This is not a VM shutdown signal, is excluded from retirement counts, waves and backlog, and does not prove that this tenant has active RI purchases.</p>")
+        [void]$riBuilder.Append("<div class='kpis preview-kpis'><div class='kpi'><div class='kpi-label'>Compute resources scanned</div><div class='kpi-value'>$(ConvertTo-HtmlText $riCutoffScanned)</div></div><div class='kpi'><div class='kpi-label'>Resources in cutoff families</div><div class='kpi-value'>$(ConvertTo-HtmlText $riCutoffRows.Count)</div></div></div>")
+        if ($riCutoffRows.Count -gt 0) {
+            [void]$riBuilder.Append("<div class='table-wrap'><table><thead><tr><th>VM family</th><th>Resources in scope</th><th>VM sizes seen</th><th>RI purchase/renewal cutoff</th><th>VM retirement signal</th><th>Action</th></tr></thead><tbody>")
+            foreach ($familyGroup in @($riCutoffRows | Group-Object -Property Family | Sort-Object -Property Name)) {
+                $familyRows = @($familyGroup.Group)
+                $resourceTypes = @($familyRows | Where-Object { $_.PSObject.Properties.Match('ResourceType').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$_.ResourceType) } | ForEach-Object { [string]$_.ResourceType } | Select-Object -Unique | Sort-Object)
+                $typeSummaryParts = New-Object 'System.Collections.Generic.List[string]'
+                foreach ($resourceType in $resourceTypes) {
+                    $typeCount = @($familyRows | Where-Object { [string]$_.ResourceType -eq $resourceType }).Count
+                    $typeSummaryParts.Add(('{0}: {1}' -f (ConvertTo-HtmlText $resourceType), $typeCount)) | Out-Null
+                }
+                $typeSummary = if ($typeSummaryParts.Count -gt 0) { $typeSummaryParts -join '<br/>' } else { 'N/A' }
+                $sizesSeen = @($familyRows | Where-Object { $_.PSObject.Properties.Match('CurrentSku').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$_.CurrentSku) } | ForEach-Object { [string]$_.CurrentSku } | Select-Object -Unique | Sort-Object)
+                $sizesText = if ($sizesSeen.Count -gt 0) { $sizesSeen -join ', ' } else { 'N/A' }
+                $cutoffDates = @($familyRows | Where-Object { $_.PSObject.Properties.Match('CutoffDate').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$_.CutoffDate) } | ForEach-Object { [string]$_.CutoffDate } | Select-Object -Unique | Sort-Object)
+                $cutoffText = if ($cutoffDates.Count -gt 0) { $cutoffDates -join ', ' } else { $riCutoffDate }
+                $retirementDates = @($familyRows | Where-Object { $_.PSObject.Properties.Match('RetirementDate').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$_.RetirementDate) -and [string]$_.RetirementDate -ne 'N/A' } | ForEach-Object { [string]$_.RetirementDate } | Select-Object -Unique | Sort-Object)
+                $retirementText = if ($retirementDates.Count -gt 0) { $retirementDates -join ', ' } else { 'No VM-size retirement signal from this cutoff alone' }
+                $familyName = if ([string]::IsNullOrWhiteSpace([string]$familyGroup.Name)) { 'N/A' } else { [string]$familyGroup.Name }
+                [void]$riBuilder.Append("<tr><td><strong>$(ConvertTo-HtmlText $familyName)</strong></td><td><strong>$(ConvertTo-HtmlText $familyRows.Count)</strong><br/><span class='meta'>$typeSummary</span></td><td>$(ConvertTo-HtmlText $sizesText)</td><td><span class='tag tag-advisor'>$(ConvertTo-HtmlText $cutoffText)</span><br/><span class='meta'>Planning signal only; actual RI inventory is not queried</span></td><td>$(ConvertTo-HtmlText $retirementText)</td><td>FinOps planning: this family summary does not prove an active RI exists. Use Excel/JSON for the resource list only if a reservation review is needed.</td></tr>")
+            }
+            [void]$riBuilder.Append('</tbody></table></div>')
+        }
+        else {
+            [void]$riBuilder.Append('<p class="meta">No scanned compute resource matched the current Reserved VM Instance cutoff family list.</p>')
+        }
+        [void]$riBuilder.Append('</section>')
+        $riCutoffPreviewHtml = $riBuilder.ToString()
+    }
+
     $html = @"
 <!doctype html>
 <html lang="en">
@@ -5049,19 +5636,20 @@ function ConvertTo-SimplifiedReportHtml {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Azure SKU Modernization Report</title>
 <style>
-body { font-family: Segoe UI, Arial, sans-serif; color: #1f2937; margin: 0; background: linear-gradient(180deg, #f8fafc 0%, #ffffff 220px); }
-main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 30px; }
+* { box-sizing: border-box; }
+body { font-family: Segoe UI, Arial, sans-serif; color: #1f2937; margin: 0; background: linear-gradient(180deg, #f8fafc 0%, #ffffff 220px); overflow-x: hidden; }
+main { width: 100%; margin: 0; padding: 24px 20px 30px; }
 h1 { font-size: 28px; margin: 0 0 4px; }
 h2 { font-size: 18px; margin: 18px 0 10px; }
 p { line-height: 1.45; margin: 0; }
 a { text-decoration: none; color: #464feb; }
 .meta { color: #6b7280; font-size: 12px; }
 .statusbar { margin: 14px 0 16px; border: 1px solid #dbe4ff; background: #eef2ff; color: #1e3a8a; border-radius: 10px; padding: 10px 12px; font-weight: 600; font-size: 13px; }
-.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 16px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 14px 0 16px; }
 .kpi { border: 1px solid #e6e6e6; padding: 14px; border-radius: 10px; background: #ffffff; box-shadow: 0 1px 0 rgba(15,23,42,0.04); }
 .kpi-label { color: #6b7280; font-size: 12px; }
 .kpi-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
-.timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 10px 0 14px; }
+.timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin: 10px 0 14px; }
 .wave-chip { border-radius: 999px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; font-weight: 700; }
 .wave-chip-title { font-size: 12px; }
 .wave-chip-count { font-size: 14px; }
@@ -5104,6 +5692,7 @@ a { text-decoration: none; color: #464feb; }
 .tag-gen { background: #fee2e2; color: #b91c1c; }
 .tag-os { background: #e5e7eb; color: #374151; }
 .tag-osflag { background: #fef3c7; color: #92400e; }
+.tag-preview { background: #dcfce7; color: #166534; vertical-align: middle; }
 .note { background: #f8fafc; border-left: 4px solid #64748b; padding: 12px 14px; margin: 12px 0; }
 .disclaimer { background: #fff7ed; border-left: 4px solid #ea580c; padding: 12px 14px; margin: 16px 0; font-size: 13px; }
 .coverage { background: #f0f9ff; border-left: 4px solid #0284c7; padding: 12px 16px; margin: 16px 0; font-size: 13px; }
@@ -5113,12 +5702,12 @@ a { text-decoration: none; color: #464feb; }
 .accordion > summary::-webkit-details-marker { display: none; }
 .accordion-body { padding: 12px 14px 14px; }
 .footer { color: #6b7280; font-size: 12px; margin-top: 32px; border-top: 1px solid #e6e6e6; padding-top: 16px; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 12px; }
 tr th, tr td { border: 1px solid #e6e6e6; vertical-align: top; }
 tr th { background-color: #f5f5f5; text-align: left; padding: 8px; }
 td { padding: 8px; }
 ul { margin-top: 8px; }
-.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 100vh; }
+.layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: 240px; overflow: auto; background: #0f172a; color: #f8fafc; padding: 24px 20px; }
 .sidebar h1 { font-size: 21px; line-height: 1.15; margin-bottom: 14px; }
 .sidebar .side-muted, .sidebar .side-item span { color: #cbd5e1; }
@@ -5127,15 +5716,39 @@ ul { margin-top: 8px; }
 .freshness-badge { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 5px 9px; font-weight: 800; font-size: 11px; margin-top: 8px; }
 .freshness-ok { background: #dcfce7; color: #166534; }
 .freshness-warn { background: #fef3c7; color: #92400e; }
-.dashboard { margin-left: 280px; padding: 22px 24px 34px; max-width: 1360px; }
+.section-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.report-nav { display: grid; gap: 7px; margin: 16px 0 14px; }
+.report-nav label { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; padding: 9px 10px; color: #cbd5e1; background: rgba(255,255,255,0.04); cursor: pointer; font-size: 12px; font-weight: 800; }
+.report-nav label span { color: #94a3b8; font-size: 10px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
+.report-nav label:hover { background: rgba(255,255,255,0.09); color: #ffffff; }
+#view-overview:checked ~ .layout label[for='view-overview'],
+#view-engineer:checked ~ .layout label[for='view-engineer'],
+#view-project:checked ~ .layout label[for='view-project'],
+#view-finops:checked ~ .layout label[for='view-finops'],
+#view-coverage:checked ~ .layout label[for='view-coverage'] { background: #eff6ff; border-color: #93c5fd; color: #1e3a8a; }
+#view-overview:checked ~ .layout label[for='view-overview'] span,
+#view-engineer:checked ~ .layout label[for='view-engineer'] span,
+#view-project:checked ~ .layout label[for='view-project'] span,
+#view-finops:checked ~ .layout label[for='view-finops'] span,
+#view-coverage:checked ~ .layout label[for='view-coverage'] span { color: #2563eb; }
+.tab-panel { display: none; }
+#view-overview:checked ~ .layout .tab-overview,
+#view-engineer:checked ~ .layout .tab-engineer,
+#view-project:checked ~ .layout .tab-project,
+#view-finops:checked ~ .layout .tab-finops,
+#view-coverage:checked ~ .layout .tab-coverage { display: block; }
+.tab-heading { margin: 0 0 14px; }
+.tab-heading h2 { margin: 0 0 4px; font-size: 22px; }
+.tab-heading p { color: #475569; font-size: 13px; }
+.dashboard { margin-left: 240px; width: calc(100vw - 240px); padding: 22px clamp(16px, 2vw, 34px) 34px; max-width: none; }
 .exec-band { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; box-shadow: 0 10px 24px rgba(15,23,42,0.06); }
-.exec-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
-.exec-grid .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
-.monitoring-panel .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 10px 0; }
+.exec-grid { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
+.exec-grid .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0; }
+.monitoring-panel .kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 10px 0; }
 .exec-narrative { color: #334155; font-size: 15px; line-height: 1.5; margin: 8px 0 12px; }
 .exec-bullets { margin: 10px 0 0; padding-left: 18px; color: #334155; }
 .exec-bullets li { margin: 4px 0; }
-.info-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.info-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 14px 0; }
 .info-card { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 12px; }
 .info-label { color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .info-value { font-size: 16px; font-weight: 800; margin-top: 5px; color: #0f172a; }
@@ -5144,13 +5757,13 @@ ul { margin-top: 8px; }
 .story-title { font-size: 24px; line-height: 1.15; margin: 6px 0 8px; color: #0f172a; }
 .story-subtitle { color: #334155; font-size: 14px; margin-bottom: 10px; }
 .story-status { display: inline-flex; border: 1px solid #bfdbfe; border-radius: 999px; padding: 5px 10px; background: #eff6ff; color: #1e3a8a; font-weight: 800; font-size: 12px; }
-.decision-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.decision-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
 .decision-card { border-radius: 12px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
 .decision-tag { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
 .decision-value { font-size: 28px; font-weight: 900; margin-top: 5px; color: #0f172a; }
 .decision-title { font-size: 14px; font-weight: 800; color: #1e293b; margin-top: 4px; }
 .decision-note { font-size: 12px; color: #334155; margin-top: 6px; }
-.matrix-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.matrix-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
 .matrix-cell { border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
 .matrix-axis { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; color: #64748b; }
 .matrix-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 5px; }
@@ -5161,7 +5774,7 @@ ul { margin-top: 8px; }
 .cell-high-high { border-left: 5px solid #ea580c; }
 .cell-low-high { border-left: 5px solid #2563eb; }
 .cell-low-low { border-left: 5px solid #16a34a; }
-.scenario-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.scenario-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .scenario-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #ffffff; }
 .scenario-card h3 { margin: 0; font-size: 14px; }
 .scenario-count { font-size: 22px; font-weight: 900; margin-top: 6px; color: #0f172a; }
@@ -5194,12 +5807,15 @@ ul { margin-top: 8px; }
 .help-close { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; border-radius: 999px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; cursor: pointer; font-weight: 900; }
 .help-close:hover { background: #eff6ff; border-color: #93c5fd; }
 .help-layer-body { padding: 16px; }
-.content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; margin-top: 18px; }
+.content-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 18px; align-items: start; margin-top: 18px; }
 .panel { border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; padding: 16px; box-shadow: 0 1px 0 rgba(15,23,42,0.04); }
+.preview-panel { border-left: 6px solid #16a34a; background: #fbfffc; }
+.finops-panel { border-left: 6px solid #0ea5e9; background: #f0f9ff; }
+.preview-kpis { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); max-width: none; }
 .monitoring-panel { border-left: 6px solid #475569; background: #f8fafc; }
 .monitoring-panel h2 { margin-top: 0; }
 .outside-count { display: inline-block; border: 1px solid #cbd5e1; background: #ffffff; color: #334155; border-radius: 999px; padding: 4px 9px; font-size: 11px; font-weight: 800; margin: 6px 0 10px; }
-.timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 10px 0 14px; }
+.timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin: 10px 0 14px; }
 .timeline-card { border-radius: 10px; padding: 12px; border: 1px solid transparent; min-height: 108px; }
 .timeline-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .wave-code { font-weight: 900; letter-spacing: .03em; }
@@ -5221,18 +5837,25 @@ ul { margin-top: 8px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .swatch-blue { background: #2563eb; }
 .swatch-red { background: #b91c1c; }
-.money-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.money-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .money-cell { border: 1px solid #e2e8f0; border-radius: 9px; padding: 10px; background: #ffffff; }
 .money-label { color: #64748b; font-size: 11px; font-weight: 800; }
 .money-value { font-weight: 900; margin-top: 4px; }
-.table-wrap { overflow-x: auto; }
+.table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap table { min-width: 920px; }
 .monitor-table { margin-top: 10px; }
-@media print { body { background: #ffffff; } .help-tab, .help-overlay, .help-toggle { display: none !important; } .layout { display: block; } .sidebar { position: static; width: auto; color: #0f172a; background: #ffffff; border-bottom: 1px solid #cbd5e1; } .sidebar .side-muted, .sidebar .side-item span { color: #334155; } .sidebar .side-item strong { color: #0f172a; } .dashboard { margin-left: 0; padding: 12px 0; max-width: none; } .exec-grid, .content-grid, .info-strip, .kpis, .timeline, .money-grid, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { display: block; } .panel, .exec-band, .timeline-card, .kpi, .info-card, .story-band { break-inside: avoid; box-shadow: none; margin: 8px 0; } details, details:not([open]) > * { display: block !important; } summary { display: block; } }
-@media (max-width: 920px) { .kpis { grid-template-columns: 1fr 1fr; } .timeline { grid-template-columns: 1fr 1fr 1fr; } }
-@media (max-width: 760px) { .layout { display: block; } .sidebar { position: static; width: auto; } .dashboard { margin-left: 0; padding: 14px; } .help-overlay { padding: 14px; } .exec-grid, .content-grid, .info-strip, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { grid-template-columns: 1fr; } .kpis { grid-template-columns: 1fr; } .timeline { grid-template-columns: 1fr; } .wave-item-top { flex-direction: column; align-items: flex-start; } .story-title { font-size: 20px; } table { font-size: 11px; } }
+@media print { body { background: #ffffff; } .help-tab, .help-overlay, .help-toggle, .section-toggle, .report-nav { display: none !important; } .tab-panel { display: block !important; } .layout { display: block; } .sidebar { position: static; width: auto; color: #0f172a; background: #ffffff; border-bottom: 1px solid #cbd5e1; } .sidebar .side-muted, .sidebar .side-item span { color: #334155; } .sidebar .side-item strong { color: #0f172a; } .dashboard { margin-left: 0; padding: 12px 0; max-width: none; } .exec-grid, .content-grid, .info-strip, .kpis, .timeline, .money-grid, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { display: block; } .panel, .exec-band, .timeline-card, .kpi, .info-card, .story-band, .tab-panel { break-inside: avoid; box-shadow: none; margin: 8px 0; } details, details:not([open]) > * { display: block !important; } summary { display: block; } }
+@media (max-width: 1120px) { .exec-grid { grid-template-columns: 1fr; } }
+@media (max-width: 920px) { .sidebar { width: 220px; } .dashboard { margin-left: 220px; width: calc(100vw - 220px); } }
+@media (max-width: 760px) { body { overflow-x: auto; } .layout { display: block; } .sidebar { position: static; width: auto; } .report-nav { grid-template-columns: 1fr 1fr; } .dashboard { margin-left: 0; width: 100%; padding: 14px; } .help-overlay { padding: 14px; } .exec-grid, .content-grid, .info-strip, .decision-grid, .matrix-grid, .scenario-grid, .legend-grid { grid-template-columns: 1fr; } .kpis { grid-template-columns: 1fr; } .timeline { grid-template-columns: 1fr; } .wave-item-top { flex-direction: column; align-items: flex-start; } .story-title { font-size: 20px; } table { font-size: 11px; } }
 </style>
 </head>
 <body>
+<input class="section-toggle" type="radio" name="report-view" id="view-overview" checked />
+<input class="section-toggle" type="radio" name="report-view" id="view-engineer" />
+<input class="section-toggle" type="radio" name="report-view" id="view-project" />
+<input class="section-toggle" type="radio" name="report-view" id="view-finops" />
+<input class="section-toggle" type="radio" name="report-view" id="view-coverage" />
 <input class="help-toggle" type="checkbox" id="report-help-toggle" />
 <div class="help-overlay">
 <div class="help-layer" role="dialog" aria-modal="true" aria-labelledby="report-help-title">
@@ -5243,7 +5866,7 @@ ul { margin-top: 8px; }
 <section class="legend-box">
 <h3>Core concepts</h3>
 <dl>
-<div><dt>Retirement path</dt><dd>VMs with a compute SKU retirement signal from Advisor or Microsoft Learn. This is the main remediation population.</dd></div>
+<div><dt>Compute retirement path</dt><dd>Standalone VMs plus Public Preview Batch/VMSS sidecars whose VM size has a retirement signal. Remediation waves still cover standalone VMs only.</dd></div>
 <div><dt>Advisor-confirmed</dt><dd>Per-resource Advisor signal. It is stronger than a generic family exposure because Azure identified the specific VM.</dd></div>
 <div><dt>SKU-family exposure</dt><dd>The current VM size belongs to a retiring SKU family from Microsoft Learn, even when Advisor did not emit a per-resource row.</dd></div>
 <div><dt>Monitoring lifecycle</dt><dd>Dependency Agent / VM Insights Map lifecycle findings. These are intentionally separate and never counted as compute SKU retirements.</dd></div>
@@ -5288,6 +5911,13 @@ ul { margin-top: 8px; }
 <h1>Azure SKU Modernization Report</h1>
 <p class="side-muted">Not an official Microsoft tool. Validate all signals in Azure Advisor, Service Health and the Azure Retirement Workbook before migration decisions.</p>
 <div class="freshness-badge $(if ($liveSourcesOk) { 'freshness-ok' } else { 'freshness-warn' })">Data Freshness: $(ConvertTo-HtmlText $freshnessText) &middot; Live sources $(ConvertTo-HtmlText $liveSourcesText) &middot; As-of $(ConvertTo-HtmlText $asOfText)</div>
+<nav class="report-nav" aria-label="Report sections">
+<label for="view-overview">Executive Overview <span>CXO</span></label>
+<label for="view-engineer">CSA / Engineer <span>Detail</span></label>
+<label for="view-project">Project Plan <span>PM</span></label>
+<label for="view-finops">FinOps <span>Cost</span></label>
+<label for="view-coverage">Coverage <span>Evidence</span></label>
+</nav>
 <div class="side-item"><span>Generated (UTC)</span><strong>$(ConvertTo-HtmlText $generatedUtc)</strong></div>
 <div class="side-item"><span>Live sources</span><strong>$(ConvertTo-HtmlText $liveSources)</strong></div>
 <div class="side-item"><span>Tenants / subscriptions</span><strong>$(ConvertTo-HtmlText $tenantCount) / $(ConvertTo-HtmlText $subscriptionCount)</strong></div>
@@ -5295,22 +5925,25 @@ ul { margin-top: 8px; }
 <label class="help-tab" for="report-help-toggle" title="Open report guide" aria-label="Open report guide">Legend</label>
 </aside>
 <main class="dashboard">
+<div class="tab-panel tab-overview">
 <section class="exec-band">
 <div class="exec-grid">
 <div>
 <h2>Executive Summary<span class="info-dot" title="Fact-derived overview of retirement exposure, source split, generation split and retail delta.">i</span></h2>
 $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='exec-narrative'>$(ConvertTo-HtmlText $ExecutiveNarrativeText)</p>" } else { '' })
 <ul class="exec-bullets">
-<li><strong>Retirement path:</strong> $(ConvertTo-HtmlText $Facts.RetireCount) VM(s) = $(ConvertTo-HtmlText $Facts.AdvisorConfirmed) Advisor-confirmed + $(ConvertTo-HtmlText $Facts.SkuFamily) SKU-family exposure.</li>
+<li><strong>Compute retirement path:</strong> $(ConvertTo-HtmlText $computeRetirementCount) resource(s) = $(ConvertTo-HtmlText $Facts.RetireCount) standalone VM(s) + $(ConvertTo-HtmlText $vmssPreviewRows.Count) VMSS + $(ConvertTo-HtmlText $batchPreviewRows.Count) Batch pool(s).</li>
+<li><strong>Standalone VM source split:</strong> $(ConvertTo-HtmlText $Facts.AdvisorConfirmed) Advisor-confirmed + $(ConvertTo-HtmlText $Facts.SkuFamily) SKU-family exposure; VM remediation waves cover these $(ConvertTo-HtmlText $Facts.RetireCount) VM(s).</li>
 <li><strong>Retail delta/month:</strong> $(ConvertTo-HtmlText $costImpact). PAYG/list-price signal only; not a validated saving.</li>
 <li><strong>Generation split:</strong> $(ConvertTo-HtmlText $noGenChangeCount) same-generation resize(s) &middot; $(ConvertTo-HtmlText $genChangeCount) Gen1&rarr;Gen2 change(s).</li>
+<li><strong>RI cutoff planning:</strong> $(ConvertTo-HtmlText $riCutoffRows.Count) resource(s) in affected families; actual RI inventory is not queried and this is not a shutdown signal.</li>
 <li><strong>Monitoring lifecycle:</strong> $(ConvertTo-HtmlText $Facts.MonitoringDistinctVmCount) VM(s) tracked separately, outside compute retirement count.</li>
 </ul>
 </div>
 <div class="kpis">
-<div class="kpi"><div class="kpi-label">Retirement path<span class="info-dot" title="VMs on a compute SKU retirement path; monitoring lifecycle rows are excluded.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.RetireCount)</div></div>
-<div class="kpi"><div class="kpi-label">Advisor confirmed<span class="info-dot" title="Per-resource Azure Advisor retirement signal for a specific VM.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.AdvisorConfirmed)</div></div>
-<div class="kpi"><div class="kpi-label">SKU-family exposure<span class="info-dot" title="VM size belongs to a retiring SKU family from Microsoft Learn.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.SkuFamily)</div></div>
+<div class="kpi"><div class="kpi-label">Compute retirement path<span class="info-dot" title="Standalone VM retirement path plus Public Preview VMSS and Batch sidecar rows. Monitoring lifecycle rows are excluded.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $computeRetirementCount)</div></div>
+<div class="kpi"><div class="kpi-label">Standalone VMs<span class="info-dot" title="VMs that drive the main detail table, remediation waves and CSV/backlog outputs.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $Facts.RetireCount)</div></div>
+<div class="kpi"><div class="kpi-label">VMSS / Batch preview<span class="info-dot" title="Public Preview sidecar resources on a VM-size retirement path; not included in VM remediation waves.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $vmssPreviewRows.Count) / $(ConvertTo-HtmlText $batchPreviewRows.Count)</div></div>
 <div class="kpi"><div class="kpi-label">Retail delta / month<span class="info-dot" title="PAYG/list-price estimate only; not negotiated price, RI/SP impact or validated saving.">i</span></div><div class="kpi-value">$(ConvertTo-HtmlText $costImpact)</div></div>
 </div>
 </div>
@@ -5319,7 +5952,8 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 <section class="info-strip">
 <div class="info-card"><div class="info-label">Nearest retirement deadline</div><div class="info-value">$(ConvertTo-HtmlText $deadlineText)</div><div class="meta">$(if ($deadlineVm) { "VM: $(ConvertTo-HtmlText $deadlineVm)" } else { 'No dated retirement row' })</div></div>
 <div class="info-card"><div class="info-label">SKU change vs generation change</div><div class="info-value">$(ConvertTo-HtmlText $noGenChangeCount) same-gen &middot; $(ConvertTo-HtmlText $genChangeCount) Gen1&rarr;Gen2</div><div class="meta">Counts read from report facts.</div></div>
-<div class="info-card"><div class="info-label">RI / Savings Plan impact</div><div class="info-value">$(ConvertTo-HtmlText $commitmentImpactCount) flagged</div><div class="meta">Warning only; no cost math invented.</div></div>
+<div class="info-card"><div class="info-label">RI / Savings Plan retirement flag</div><div class="info-value">$(ConvertTo-HtmlText $commitmentImpactCount) flagged</div><div class="meta">SKU offer signal only; not actual tenant commitment inventory.</div></div>
+<div class="info-card"><div class="info-label">RI cutoff planning</div><div class="info-value">$(ConvertTo-HtmlText $riCutoffRows.Count) in cutoff families</div><div class="meta">No active RI is inferred; verify reservations separately.</div></div>
 </section>
 
 <section class="story-band">
@@ -5347,13 +5981,30 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 <div class="decision-title">Low-complexity moves (W4)</div>
 <div class="decision-note">Candidate moves for accelerated execution batches, often suitable for standard runbooks.</div>
 </article>
+<article class="decision-card">
+<div class="decision-tag">Preview sidecars</div>
+<div class="decision-value">$(ConvertTo-HtmlText $sidecarRetirementCount)</div>
+<div class="decision-title">VMSS + Batch</div>
+<div class="decision-note">Separate detail tables below; keep them visible in planning but outside standalone VM wave counts.</div>
+</article>
 </div>
 
 <div class="confidence-line">
 <span class="confidence-chip">Advisor-confirmed share: $(ConvertTo-HtmlText $advisorConfidencePercent)% of retirement-path VMs</span>
 <span class="confidence-chip">Live source status: $(ConvertTo-HtmlText $liveCoverage)</span>
+<span class="confidence-chip">Compute total: $(ConvertTo-HtmlText $computeRetirementCount) = VM $(ConvertTo-HtmlText $Facts.RetireCount) + VMSS $(ConvertTo-HtmlText $vmssPreviewRows.Count) + Batch $(ConvertTo-HtmlText $batchPreviewRows.Count)</span>
+<span class="confidence-chip">RI cutoff planning: $(ConvertTo-HtmlText $riCutoffRows.Count) resource(s); actual reservations not queried</span>
 <span class="confidence-chip">Monitoring kept separate: $(ConvertTo-HtmlText $Facts.MonitoringDistinctVmCount) VM(s)</span>
 </div>
+</section>
+</div>
+
+<div class="tab-panel tab-project">
+<div class="tab-heading"><h2>Project Plan</h2><p>Delivery-oriented sequencing, risk/effort lanes and deadline pressure for standalone VM remediation waves.</p></div>
+
+<section class="panel">
+<h2>Summary by Change Type</h2>
+<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div></div></div>
 </section>
 
 <div class="content-grid">
@@ -5412,14 +6063,36 @@ $($countdownBuilder.ToString())
 </section>
 
 <section class="panel">
+<h2>Remediation Plan (waves)</h2>
+<div class="timeline">$($timelineBuilder.ToString())</div>
+$($waveBuilder.ToString())
+</section>
+</div>
+
+<div class="tab-panel tab-engineer">
+<div class="tab-heading"><h2>CSA / Engineer</h2><p>Implementation detail for standalone VMs plus Public Preview VMSS and Batch sidecars.</p></div>
+
+<section class="panel">
 <h2>CSA / Engineer Detail<span class="info-dot" title="Per-VM implementation view: wave, source, OS pricing basis, target SKU, validation caveats and next step.">i</span></h2>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU</th><th>Retail cost delta / month</th><th>Validation</th><th>Next step</th></tr></thead>
+<thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU</th><th>Validation</th><th>Next step</th></tr></thead>
 <tbody>
 "@
 
-    foreach ($row in @($Facts.Rows)) {
+    $detailRows = @($Facts.Rows | Sort-Object `
+            @{ Expression = {
+                    $vmName = if ($_.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$_.VmName } else { '' }
+                    if ($waveByVm.ContainsKey($vmName)) { [int]$waveByVm[$vmName].Number } else { 99 }
+                } },
+            @{ Expression = {
+                    $dateText = if ($_.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$_.RetirementDate } else { '' }
+                    $parsedDate = [datetime]::MaxValue
+                    if ([datetime]::TryParse($dateText, [ref]$parsedDate)) { $parsedDate } else { [datetime]::MaxValue }
+                } },
+            @{ Expression = { if ($_.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$_.VmName } else { '' } } })
+
+    foreach ($row in $detailRows) {
         $tagClass = if ($row.RetirementClass -eq 'AdvisorConfirmed') { 'tag-advisor' } else { 'tag-learn' }
         $costText = "$(Format-ReportMoney $row.RetailDeltaMonthly)$(Format-ReportPercent $row.CostDeltaPercent)"
         $waveInfo = if ($waveByVm.ContainsKey([string]$row.VmName)) { $waveByVm[[string]$row.VmName] } else { $null }
@@ -5456,7 +6129,6 @@ $($countdownBuilder.ToString())
             $recommendedCell = "$recommendedCell<br/><span class='meta'>$(ConvertTo-HtmlText $row.RecommendedSkuNote)</span>"
         }
         $html += "<td>$recommendedCell</td>"
-        $html += "<td>$(ConvertTo-HtmlText $costText)</td>"
         $html += "<td>$(ConvertTo-HtmlText $row.Validation)</td>"
         $html += "<td>$(ConvertTo-HtmlText $row.NextStep)</td>"
         $html += "</tr>"
@@ -5468,27 +6140,11 @@ $($countdownBuilder.ToString())
 </div>
 </section>
 
-<div class="content-grid">
-<div>
-<section class="panel">
-<h2>Summary by Change Type</h2>
-<div class="summary-split"><div class="donut" aria-hidden="true"></div><div class="legend"><div class="legend-row"><span class="legend-key"><span class="swatch swatch-blue"></span>Same-generation resize</span><strong>$(ConvertTo-HtmlText $noGenChangeCount)</strong></div><div class="legend-row"><span class="legend-key"><span class="swatch swatch-red"></span>Gen1&rarr;Gen2</span><strong>$(ConvertTo-HtmlText $genChangeCount)</strong></div></div></div>
-</section>
-</div>
+$previewRemediationHtml
 
-<div>
-<section class="panel">
-<h2>Cost Impact (monthly)</h2>
-$(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Total increase</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $increaseValue))</div></div><div class='money-cell'><div class='money-label'>Total decrease</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $decreaseValue))</div></div><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" } else { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" })
-</section>
-</div>
-</div>
+$batchPoolPreviewHtml
 
-<section class="panel">
-<h2>Remediation Plan (waves)</h2>
-<div class="timeline">$($timelineBuilder.ToString())</div>
-$($waveBuilder.ToString())
-</section>
+$vmssPreviewHtml
 
 <section class="panel monitoring-panel">
 <h2>Monitoring Lifecycle</h2>
@@ -5501,6 +6157,80 @@ $(if ($monitoringCount -gt 0) { "<p>Dependency Agent / VM Insights Map retiremen
 </div>
 $monitoringTableHtml
 </section>
+</div>
+
+<div class="tab-panel tab-finops">
+<div class="tab-heading"><h2>FinOps</h2><p>Retail/list-price deltas and Reserved Instance/Savings Plan planning signals.</p></div>
+
+<section class="panel">
+<h2>Cost Impact (monthly)</h2>
+$(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Total increase</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $increaseValue))</div></div><div class='money-cell'><div class='money-label'>Total decrease</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $decreaseValue))</div></div><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" } else { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" })
+</section>
+
+<section class="panel">
+<h2>VM Cost Detail<span class="info-dot" title="Per-VM PAYG/list-price delta for FinOps review. This is not negotiated pricing and does not calculate RI/Savings Plan effective rates.">i</span></h2>
+<p class="meta">Standalone VM candidates only. Retail/list-price estimate from cached Azure Retail Prices; validate negotiated pricing, reservations and Savings Plans separately.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>VM</th><th>Wave</th><th>Current SKU</th><th>Recommended SKU</th><th>Retail delta / month</th><th>Pricing basis</th><th>FinOps note</th></tr></thead>
+<tbody>
+"@
+
+    $finOpsRows = @($Facts.Rows | Sort-Object `
+            @{ Expression = {
+                    $vmName = if ($_.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$_.VmName } else { '' }
+                    if ($waveByVm.ContainsKey($vmName)) { [int]$waveByVm[$vmName].Number } else { 99 }
+                } },
+            @{ Expression = {
+                    $dateText = if ($_.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$_.RetirementDate } else { '' }
+                    $parsedDate = [datetime]::MaxValue
+                    if ([datetime]::TryParse($dateText, [ref]$parsedDate)) { $parsedDate } else { [datetime]::MaxValue }
+                } },
+            @{ Expression = { if ($_.PSObject.Properties.Match('VmName').Count -gt 0) { [string]$_.VmName } else { '' } } })
+
+    foreach ($row in $finOpsRows) {
+        $costText = "$(Format-ReportMoney $row.RetailDeltaMonthly)$(Format-ReportPercent $row.CostDeltaPercent)"
+        $waveInfo = if ($waveByVm.ContainsKey([string]$row.VmName)) { $waveByVm[[string]$row.VmName] } else { $null }
+        $waveCell = if ($waveInfo) { "<span class='wave-badge $($waveInfo.CssClass)'>W$($waveInfo.Number) &middot; $(ConvertTo-HtmlText $waveInfo.Urgency)</span>" } else { "<span class='wave-badge'>Not assigned</span>" }
+        $priceBasis = if ($row.PSObject.Properties.Match('CurrentPriceOsBasis').Count -gt 0 -and $row.CurrentPriceOsBasis) { [string]$row.CurrentPriceOsBasis } else { 'N/A' }
+        $basisLabel = switch ($priceBasis) {
+            'Windows'             { 'Windows retail meter' }
+            'Linux'               { 'Linux retail meter' }
+            'OsAgnosticFallback'  { 'OS-agnostic retail meter fallback' }
+            'NoPrice'             { 'No retail price available' }
+            default               { $priceBasis }
+        }
+        $finOpsNote = if ($row.PSObject.Properties.Match('CommitmentImpact').Count -gt 0 -and [bool]$row.CommitmentImpact) {
+            'RI/Savings Plan warning present in validation; review effective pricing and commitment coverage before scheduling.'
+        }
+        elseif ($null -eq $row.RetailDeltaMonthly) {
+            'Retail delta unavailable; verify SKU pricing manually.'
+        }
+        else {
+            'PAYG/list-price estimate only; validate Cost Management, negotiated rates, RI and Savings Plan effects.'
+        }
+        $html += "<tr>"
+        $html += "<td><strong>$(ConvertTo-HtmlText $row.VmName)</strong><br/><span class='meta'>$(ConvertTo-HtmlText $row.Region)</span></td>"
+        $html += "<td>$waveCell</td>"
+        $html += "<td>$(ConvertTo-HtmlText $row.CurrentSku)</td>"
+        $html += "<td>$(ConvertTo-HtmlText $row.RecommendedSku)</td>"
+        $html += "<td>$(ConvertTo-HtmlText $costText)</td>"
+        $html += "<td>$(ConvertTo-HtmlText $basisLabel)</td>"
+        $html += "<td>$(ConvertTo-HtmlText $finOpsNote)</td>"
+        $html += "</tr>"
+    }
+
+    $html += @"
+</tbody>
+</table>
+</div>
+</section>
+
+$riCutoffPreviewHtml
+</div>
+
+<div class="tab-panel tab-coverage">
+<div class="tab-heading"><h2>Coverage and Evidence</h2><p>Scope, source limitations, provenance and report disclaimer for audit and validation.</p></div>
 
 <details class="accordion" open>
 <summary>Analysis Coverage</summary>
@@ -5521,6 +6251,7 @@ $monitoringTableHtml
 
     $html += @"
 <div class="footer"><strong>Provenance:</strong> generated at $(ConvertTo-HtmlText $generatedUtc), live sources: $(ConvertTo-HtmlText $liveSources), as-of: $(ConvertTo-HtmlText $asOfText). <strong>Disclaimer:</strong> this script is not an official Microsoft tool; always validate in authoritative sources before decisions.</div>
+</div>
 </main>
 </div>
 </body>
@@ -5534,7 +6265,10 @@ function ConvertTo-ReportHtml {
     param(
         [Parameter(Mandatory = $true)][object[]]$Rows,
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $false)][object[]]$MonitoringLifecycle = @()
+        [Parameter(Mandatory = $false)][object[]]$MonitoringLifecycle = @(),
+        [Parameter(Mandatory = $false)]$BatchPoolPreview,
+        [Parameter(Mandatory = $false)]$VmssPreview,
+        [Parameter(Mandatory = $false)]$ReservedInstanceCutoffPreview
     )
 
     $Rows = Resolve-EvidenceSource -Rows $Rows
@@ -5611,9 +6345,13 @@ function ConvertTo-ReportHtml {
         NearestRetirementVm   = $nearestRetirementVm
     }
 
-    $executiveNarrativeText = "This run identifies $($facts.RetireCount) VM(s) on the compute retirement path: $($facts.AdvisorConfirmed) Advisor-confirmed and $($facts.SkuFamily) SKU-family exposure. Monthly retail/list-price delta is $(if ($null -ne $facts.RetailDeltaMonthly) { ('{0}{1:N2}' -f $(if ([double]$facts.RetailDeltaMonthly -gt 0) { '+' } else { '' }), [double]$facts.RetailDeltaMonthly) } else { 'N/A' }); monitoring lifecycle findings remain separate at $($facts.MonitoringDistinctVmCount) VM(s)."
+    $batchRetirementCount = if ($BatchPoolPreview -and $BatchPoolPreview.PSObject.Properties.Match('Rows').Count -gt 0) { @($BatchPoolPreview.Rows).Count } else { 0 }
+    $vmssRetirementCount = if ($VmssPreview -and $VmssPreview.PSObject.Properties.Match('Rows').Count -gt 0) { @($VmssPreview.Rows).Count } else { 0 }
+    $riCutoffCount = if ($ReservedInstanceCutoffPreview -and $ReservedInstanceCutoffPreview.PSObject.Properties.Match('Rows').Count -gt 0) { @($ReservedInstanceCutoffPreview.Rows).Count } else { 0 }
+    $computeRetirementCount = [int]$facts.RetireCount + $batchRetirementCount + $vmssRetirementCount
+    $executiveNarrativeText = "This run identifies $computeRetirementCount compute resource(s) on a VM-size retirement path: $($facts.RetireCount) standalone VM(s), $vmssRetirementCount VM Scale Set(s), and $batchRetirementCount Batch pool(s). Standalone VM remediation waves cover $($facts.RetireCount) VM(s): $($facts.AdvisorConfirmed) Advisor-confirmed and $($facts.SkuFamily) SKU-family exposure. Monthly retail/list-price delta for standalone VM candidates is $(if ($null -ne $facts.RetailDeltaMonthly) { ('{0}{1:N2}' -f $(if ([double]$facts.RetailDeltaMonthly -gt 0) { '+' } else { '' }), [double]$facts.RetailDeltaMonthly) } else { 'N/A' }); RI cutoff planning flags $riCutoffCount resource(s) in affected families but does not query actual tenant reservations."
 
-    ConvertTo-SimplifiedReportHtml -Facts $facts -Path $Path -RemediationPlan $remediationPlan -Provenance $provenance -ExecutiveNarrativeText $executiveNarrativeText
+    ConvertTo-SimplifiedReportHtml -Facts $facts -Path $Path -RemediationPlan $remediationPlan -Provenance $provenance -BatchPoolPreview $BatchPoolPreview -VmssPreview $VmssPreview -ReservedInstanceCutoffPreview $ReservedInstanceCutoffPreview -ExecutiveNarrativeText $executiveNarrativeText
 }
 function Get-AdvisorHints {
     param([Parameter(Mandatory = $false)][string[]]$SubscriptionIds)
@@ -5853,6 +6591,12 @@ try {
     Write-Log "Collecting VM inventory from Resource Graph"
     $inventory = Get-ResourceGraphVmInventory -Subscriptions $effectiveSubscriptionIds
 
+    Write-Log "Collecting Azure Batch pool inventory (public preview capability) from Resource Graph"
+    $batchPoolInventory = Get-ResourceGraphBatchPoolInventory -Subscriptions $effectiveSubscriptionIds
+
+    Write-Log "Collecting VM Scale Set inventory (public preview capability) from Resource Graph"
+    $vmssInventory = Get-ResourceGraphVmssInventory -Subscriptions $effectiveSubscriptionIds
+
     if (-not $inventory -or $inventory.Count -eq 0) {
         throw "No VM found. Check subscription scope/permissions."
     }
@@ -5899,6 +6643,10 @@ try {
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Loading retirement data"
     $retirements = Get-Retirements -UseOfficialList $UseOfficialRetirementList -UsePortalSource $UsePortalRetirementSource -Subscriptions $effectiveSubscriptionIds -AdvisorRetirementTypeIdBlocklist $AdvisorRetirementTypeIdBlocklist -AdvisorRetirementNameBlockPattern $AdvisorRetirementNameBlockPattern -RequireLiveRetirementSource $RequireLiveRetirementSource
+    $batchPoolPreview = Build-BatchPoolRetirementPreview -BatchPools $batchPoolInventory -Retirements $retirements
+    Write-Log "Batch pool public preview: scanned $($batchPoolPreview.TotalBatchPoolsScanned) pool(s), retirement path $($batchPoolPreview.RetirementPathCount)."
+    $vmssPreview = Build-VmssRetirementPreview -VmScaleSets $vmssInventory -Retirements $retirements
+    Write-Log "VMSS public preview: scanned $($vmssPreview.TotalVmssScanned) scale set(s), retirement path $($vmssPreview.RetirementPathCount)."
 
     # Monitoring-lifecycle track (Dependency Agent / VM Insights Map EOL): confirm real agent presence
     # so the separate track shows deterministic Confirmed/Unconfirmed/Unknown instead of a vague caveat.
@@ -5924,6 +6672,8 @@ try {
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Generating report output"
 
     $results = @($results | Sort-Object VmName)
+    $reservedInstanceCutoffPreview = Build-ReservedInstanceCutoffPreview -VmRows $results -BatchPools $batchPoolInventory -VmScaleSets $vmssInventory -Retirements $retirements
+    Write-Log "Reserved Instance cutoff public preview: scanned $($reservedInstanceCutoffPreview.TotalResourcesScanned) compute resource(s), exposure $($reservedInstanceCutoffPreview.ImpactCount)."
 
     $csvPath = Join-Path $runDir "sku_modernization_report.csv"
     $jsonPath = Join-Path $runDir "sku_modernization_report.json"
@@ -5935,12 +6685,15 @@ try {
         Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
     [pscustomobject]@{
-        Items = $results
+        Items            = $results
+        BatchPoolPreview = $batchPoolPreview
+        VmssPreview      = $vmssPreview
+        ReservedInstanceCutoffPreview = $reservedInstanceCutoffPreview
     } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
     Export-BacklogItems -Rows $results -Path $backlogPath
 
-    ConvertTo-ReportHtml -Rows $results -Path $htmlPath -MonitoringLifecycle $monitoringLifecycle
+    ConvertTo-ReportHtml -Rows $results -Path $htmlPath -MonitoringLifecycle $monitoringLifecycle -BatchPoolPreview $batchPoolPreview -VmssPreview $vmssPreview -ReservedInstanceCutoffPreview $reservedInstanceCutoffPreview
 
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Saving advisor hints"
