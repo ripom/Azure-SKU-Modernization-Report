@@ -98,7 +98,7 @@ param(
     [string]$AdvisorRetirementNameBlockPattern = '(?i)dependency agent|vm insights|log analytics agent|microsoft monitoring agent|azure monitor agent',
 
     # LIVE-ONLY MODE: Retirement data must come from live sources only.
-    # If $RequireLiveRetirementSource=true and both live streams fail, the script throws (no fabricated data).
+    # If $RequireLiveRetirementSource=true and all enabled live streams fail, the script throws (no fabricated data).
     # If $RequireLiveRetirementSource=false and live sources fail, the report shows only available data.
     [Parameter(Mandatory = $false)]
     [bool]$RequireLiveRetirementSource = $false,
@@ -113,13 +113,16 @@ param(
     [string]$BatchManagementApiVersion = "2025-06-01",
 
     [Parameter(Mandatory = $false)]
-    [bool]$UseReleaseCommunicationRss = $true,
+    [bool]$UseReleaseCommunicationsApi = $true,
 
     [Parameter(Mandatory = $false)]
-    [string]$ReleaseCommunicationRssUrl = "https://www.microsoft.com/releasecommunications/api/v2/azure/rss",
+    [string]$ReleaseCommunicationsApiUrl = "https://www.microsoft.com/releasecommunications/api/v2/azure?`$filter=tags/any(t:%20t%20eq%20%27Retirements%27)%20and%20(products/any(p:%20p%20eq%20%27Azure%20Dedicated%20Host%27)%20or%20products/any(p:%20p%20eq%20%27Azure%20Kubernetes%20Service%20(AKS)%27)%20or%20products/any(p:%20p%20eq%20%27Azure%20Linux%27)%20or%20products/any(p:%20p%20eq%20%27Batch%27)%20or%20products/any(p:%20p%20eq%20%27Linux%20Virtual%20Machines%27)%20or%20products/any(p:%20p%20eq%20%27Virtual%20Machine%20Scale%20Sets%27)%20or%20products/any(p:%20p%20eq%20%27Virtual%20Machines%27)%20or%20products/any(p:%20p%20eq%20%27Windows%20Virtual%20Machines%27))&`$orderby=modified%20desc",
 
     [Parameter(Mandatory = $false)]
-    [int]$RssLookbackMonths = 12,
+    [int]$ReleaseCommunicationsLookbackMonths = 0,
+
+    [Parameter(Mandatory = $false)]
+    [int]$ReleaseCommunicationsCacheTtlHours = 24,
 
     [Parameter(Mandatory = $false)]
     [bool]$IncludeExtendedLocationsInSkuApi = $true,
@@ -1656,7 +1659,7 @@ function Build-BatchPoolRetirementPreview {
     $advisorByResourceId = @{}
     if ($Retirements) {
         if ($Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
-            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') })
         }
         if ($Retirements.PSObject.Properties.Match('ByVmResourceId').Count -gt 0 -and $Retirements.ByVmResourceId) {
             $advisorByResourceId = $Retirements.ByVmResourceId
@@ -1677,7 +1680,8 @@ function Build-BatchPoolRetirementPreview {
         if (-not $advisorSignal -and -not $officialRetirement) { continue }
 
         $retirementDate = if ($officialRetirement) { Format-NullableDate $officialRetirement.RetireOn } elseif ($advisorSignal) { Format-NullableDate $advisorSignal.RetireOn } else { 'N/A' }
-        $source = if ($officialRetirement -and $advisorSignal) { 'LiveLearnMarkdown + AdvisorSignal' } elseif ($officialRetirement) { 'LiveLearnMarkdown' } else { 'LiveAdvisorArg' }
+        $officialSource = if ($officialRetirement -and $officialRetirement.Source) { [string]$officialRetirement.Source } else { 'LiveLearnMarkdown' }
+        $source = if ($officialRetirement -and $advisorSignal) { "$officialSource + AdvisorSignal" } elseif ($officialRetirement) { $officialSource } else { 'LiveAdvisorArg' }
         $seriesName = if ($officialRetirement -and $officialRetirement.PSObject.Properties.Match('SeriesName').Count -gt 0) { [string]$officialRetirement.SeriesName } else { Convert-SkuToSeriesKey -SkuName $vmSize }
 
         $rows.Add([pscustomobject]@{
@@ -1796,7 +1800,7 @@ function Build-VmssRetirementPreview {
     $advisorByResourceId = @{}
     if ($Retirements) {
         if ($Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
-            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+            $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') })
         }
         if ($Retirements.PSObject.Properties.Match('ByVmResourceId').Count -gt 0 -and $Retirements.ByVmResourceId) {
             $advisorByResourceId = $Retirements.ByVmResourceId
@@ -1817,7 +1821,8 @@ function Build-VmssRetirementPreview {
         if (-not $advisorSignal -and -not $officialRetirement) { continue }
 
         $retirementDate = if ($officialRetirement) { Format-NullableDate $officialRetirement.RetireOn } elseif ($advisorSignal) { Format-NullableDate $advisorSignal.RetireOn } else { 'N/A' }
-        $source = if ($officialRetirement -and $advisorSignal) { 'LiveLearnMarkdown + AdvisorSignal' } elseif ($officialRetirement) { 'LiveLearnMarkdown' } else { 'LiveAdvisorArg' }
+        $officialSource = if ($officialRetirement -and $officialRetirement.Source) { [string]$officialRetirement.Source } else { 'LiveLearnMarkdown' }
+        $source = if ($officialRetirement -and $advisorSignal) { "$officialSource + AdvisorSignal" } elseif ($officialRetirement) { $officialSource } else { 'LiveAdvisorArg' }
         $seriesName = if ($officialRetirement -and $officialRetirement.PSObject.Properties.Match('SeriesName').Count -gt 0) { [string]$officialRetirement.SeriesName } else { Convert-SkuToSeriesKey -SkuName $vmSize }
 
         $rows.Add([pscustomobject]@{
@@ -1854,34 +1859,64 @@ function Convert-SkuToReservedInstanceCutoffFamily {
     param([Parameter(Mandatory = $true)][string]$SkuName)
 
     $normalized = ConvertTo-NormalizedSkuName $SkuName
-    $mapping = [ordered]@{
-        '^standard_ds\d+[a-z-]*_v3$'      = 'Dsv3-series'
-        '^standard_d\d+[a-z-]*_v3$'       = 'Dv3-series'
-        '^standard_es\d+[a-z-]*_v3$'      = 'Esv3-series'
-        '^standard_e\d+[a-z-]*_v3$'       = 'Ev3-series'
-        '^standard_ds\d+[a-z-]*_v2$'      = 'Dsv2-series'
-        '^standard_d\d+[a-z-]*_v2$'       = 'Dv2-series'
-        '^standard_ds\d+[a-z-]*(?!_v\d)$' = 'Ds-series'
-        '^standard_d\d+[a-z-]*(?!_v\d)$'  = 'D-series'
-        '^standard_l\d+[a-z-]*_v2$'       = 'Lsv2-series'
-        '^standard_l\d+[a-z-]*(?!_v\d)$'  = 'Ls-series'
-        '^standard_a\d+m?_v2$'            = 'Av2/Amv2-series'
-        '^standard_b\d+[a-z-]*$'          = 'B-series (V1)'
-        '^standard_fs\d+[a-z-]*_v2$'      = 'Fsv2-series'
-        '^standard_f\d+[a-z-]*_v2$'       = 'Fsv2-series'
-        '^standard_fs\d+[a-z-]*(?!_v\d)$' = 'Fs-series'
-        '^standard_f\d+[a-z-]*(?!_v\d)$'  = 'F-series'
-        '^standard_gs\d+[a-z-]*(?!_v\d)$' = 'Gs-series'
-        '^standard_g\d+[a-z-]*(?!_v\d)$'  = 'G-series'
+    if ($normalized -notmatch '^standard_([a-z]+)(\d+)([a-z]*)(?:_v(\d+))?$') { return $null }
+
+    $prefix = [string]$Matches[1]
+    $suffix = [string]$Matches[3]
+    $version = [string]$Matches[4]
+    $stem = "$prefix$suffix"
+    if ($prefix -eq 'b' -and -not $version) {
+        $seriesToken = 'Bv1'
+    }
+    elseif ($prefix -eq 'a' -and $version -eq '2') {
+        $seriesToken = if ($stem -match 'm') { 'Amv2' } else { 'Av2' }
+    }
+    elseif ($prefix -eq 'f' -and $version -eq '2') {
+        $seriesToken = 'Fsv2'
+    }
+    else {
+        $seriesToken = $stem.Substring(0, 1).ToUpperInvariant() + $stem.Substring(1)
+        if ($version) { $seriesToken += "v$version" }
     }
 
-    foreach ($pattern in $mapping.Keys) {
-        if ($normalized -match $pattern) {
-            return $mapping[$pattern]
+    return "$seriesToken-series"
+}
+
+function Get-ReleaseCommunicationReservedInstanceCutoff {
+    param([Parameter(Mandatory = $false)][object[]]$Items = @())
+
+    foreach ($item in @($Items)) {
+        if (-not $item) { continue }
+        $text = [System.Net.WebUtility]::HtmlDecode((([string]$item.Title, [string]$item.Description) -join ' ')) -replace '<[^>]+>', ' ' -replace '\s+', ' '
+        $tags = if ($item.PSObject.Properties.Match('Tags').Count -gt 0) { @($item.Tags | ForEach-Object { [string]$_ }) } else { @() }
+        if ($text -notmatch '(?i)reserved\s+(?:virtual\s+machine|vm)\s+instances?' -or $text -notmatch '(?i)purchase|renewal' -or 'Pricing & Offerings' -notin $tags) { continue }
+        $cutoffDate = Get-ReleaseCommunicationRetirementDate -Item $item
+        if (-not $cutoffDate) { continue }
+        return [pscustomobject]@{
+            CutoffDate = $cutoffDate
+            Text       = $text
+            SourceUrl  = [string]$item.Link
         }
     }
 
     return $null
+}
+
+function Test-ReleaseCommunicationReservedInstanceFamily {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Family
+    )
+
+    $baseName = ($Family -replace '(?i)-series(?:\s*\(V1\))?$', '').Trim()
+    $terms = @($baseName)
+    if ($Family -match '(?i)\(V1\)' -and $baseName -notmatch '(?i)v1$') { $terms += "${baseName}v1" }
+    if ($baseName -match '/') { $terms += @($baseName -split '/') }
+    foreach ($term in @($terms | Where-Object { $_ } | Select-Object -Unique)) {
+        $escaped = [regex]::Escape($term)
+        if ($Text -match "(?i)(?<![a-z0-9])$escaped(?![a-z0-9])") { return $true }
+    }
+    return $false
 }
 
 function Build-ReservedInstanceCutoffPreview {
@@ -1889,17 +1924,19 @@ function Build-ReservedInstanceCutoffPreview {
         [Parameter(Mandatory = $false)][object[]]$VmRows = @(),
         [Parameter(Mandatory = $false)][object[]]$BatchPools = @(),
         [Parameter(Mandatory = $false)][object[]]$VmScaleSets = @(),
-        [Parameter(Mandatory = $false)]$Retirements
+        [Parameter(Mandatory = $false)]$Retirements,
+        [Parameter(Mandatory = $false)][object[]]$ReleaseCommunicationItems = @()
     )
 
-    $cutoffDate = '2026-07-01'
+    $cutoff = Get-ReleaseCommunicationReservedInstanceCutoff -Items $ReleaseCommunicationItems
+    $cutoffDate = if ($cutoff) { [string]$cutoff.CutoffDate } else { 'N/A' }
     $rows = New-Object 'System.Collections.Generic.List[object]'
     $vmItems = @($VmRows | Where-Object { $null -ne $_ })
     $batchPoolItems = @($BatchPools | Where-Object { $null -ne $_ })
     $vmssItems = @($VmScaleSets | Where-Object { $null -ne $_ })
     $liveSeries = @()
     if ($Retirements -and $Retirements.PSObject.Properties.Match('Series').Count -gt 0) {
-        $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -eq 'LiveLearnMarkdown' })
+        $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match('Source').Count -gt 0 -and $_.Source -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') })
     }
 
     function Add-RiCutoffRow {
@@ -1916,7 +1953,7 @@ function Build-ReservedInstanceCutoffPreview {
 
         if ([string]::IsNullOrWhiteSpace($CurrentSku)) { return }
         $family = Convert-SkuToReservedInstanceCutoffFamily -SkuName $CurrentSku
-        if (-not $family) { return }
+        if (-not $cutoff -or -not $family -or -not (Test-ReleaseCommunicationReservedInstanceFamily -Text $cutoff.Text -Family $family)) { return }
 
         $resolvedRetirementDate = if (-not [string]::IsNullOrWhiteSpace($RetirementDate) -and $RetirementDate -ne 'N/A') { $RetirementDate } else { 'N/A' }
         if ($resolvedRetirementDate -eq 'N/A') {
@@ -1938,7 +1975,7 @@ function Build-ReservedInstanceCutoffPreview {
             CutoffDate       = $cutoffDate
             RetirementDate   = $resolvedRetirementDate
             Signal           = 'Reserved VM Instance new purchase/renewal cutoff'
-            Source           = 'Curated public announcement - verify in Microsoft commercial guidance'
+            Source           = $cutoff.SourceUrl
             Action           = 'FinOps planning: this row does not prove an active RI exists. If there is no RI estate for this scope, treat it as roadmap context only; otherwise review renewal plans, coverage/utilization and migration timing before the cutoff.'
         }) | Out-Null
     }
@@ -1999,7 +2036,7 @@ function Get-ReportCountSnapshot {
             $retireCount++
             $advisorConfirmed++
         }
-        elseif ($gate -eq 'LiveLearnMarkdown' -or $evidence -eq 'LiveLearnMarkdown' -or $evidence -eq 'LiveLearnMarkdown + AdvisorSignal') {
+        elseif ($gate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $evidence -in @('LiveLearnMarkdown', 'LiveLearnMarkdown + AdvisorSignal', 'ReleaseCommunicationsApi', 'ReleaseCommunicationsApi + AdvisorSignal')) {
             $retireCount++
             $skuFamily++
         }
@@ -2017,7 +2054,7 @@ function Get-ReportCountSnapshot {
     }
 }
 
-function Assert-CountsUnchangedAfterRss {
+function Assert-CountsUnchangedAfterReleaseCommunicationCoverage {
     param(
         [Parameter(Mandatory = $true)]$Before,
         [Parameter(Mandatory = $true)]$After
@@ -2027,45 +2064,259 @@ function Assert-CountsUnchangedAfterRss {
         $beforeValue = if ($Before.PSObject.Properties.Match($name).Count -gt 0) { [int]$Before.$name } else { 0 }
         $afterValue = if ($After.PSObject.Properties.Match($name).Count -gt 0) { [int]$After.$name } else { 0 }
         if ($beforeValue -ne $afterValue) {
-            throw "RSS invariant failure: $name changed after Release Communications RSS ingest. Before=$beforeValue After=$afterValue. RSS is context-only and must not change report counts."
+            throw "Release Communications coverage invariant failure: $name changed while building the coverage section. Before=$beforeValue After=$afterValue. Coverage rendering must not mutate report findings."
         }
     }
 }
 
-function Get-ReleaseCommunicationsRssItems {
+function ConvertFrom-ReleaseCommunicationApiRecord {
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [Parameter(Mandatory = $true)][string]$ApiBaseUrl
+    )
+
+    $published = [datetime]::MinValue
+    $publishedValue = if ($Record.PSObject.Properties.Match('created').Count -gt 0 -and $null -ne $Record.created) { $Record.created } elseif ($Record.PSObject.Properties.Match('modified').Count -gt 0 -and $null -ne $Record.modified) { $Record.modified } else { $null }
+    if ($publishedValue -is [datetime]) {
+        $published = [datetime]$publishedValue
+    }
+    elseif ($null -eq $publishedValue -or -not [datetime]::TryParse([string]$publishedValue, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$published)) {
+        $published = [datetime]::MinValue
+    }
+
+    $modified = [datetime]::MinValue
+    $modifiedValue = if ($Record.PSObject.Properties.Match('modified').Count -gt 0) { $Record.modified } else { $null }
+    if ($modifiedValue -is [datetime]) {
+        $modified = [datetime]$modifiedValue
+    }
+    elseif ($null -eq $modifiedValue -or -not [datetime]::TryParse([string]$modifiedValue, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$modified)) {
+        $modified = [datetime]::MinValue
+    }
+
+    $categories = @(
+        @([string]$Record.status)
+        @($Record.productCategories | ForEach-Object { [string]$_ })
+        @($Record.products | ForEach-Object { [string]$_ })
+        @($Record.tags | ForEach-Object { [string]$_ })
+        @($Record.availabilities | ForEach-Object { [string]$_.ring })
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    $id = if ($Record.id) { [string]$Record.id } else { '' }
+
+    return [pscustomobject]@{
+        Guid          = $id
+        Title         = if ($Record.title) { [string]$Record.title } else { '' }
+        Description   = if ($Record.description) { [string]$Record.description } else { '' }
+        Link          = if ($id) { "https://azure.microsoft.com/updates?id=$([uri]::EscapeDataString($id))" } else { '' }
+        PublishedDate = if ($published -ne [datetime]::MinValue) { $published.ToUniversalTime().ToString('yyyy-MM-dd') } else { 'N/A' }
+        ModifiedUtc   = if ($modified -ne [datetime]::MinValue) { $modified.ToUniversalTime().ToString('o') } else { 'N/A' }
+        Categories    = @($categories)
+        Products      = @($Record.products | ForEach-Object { [string]$_ })
+        Tags          = @($Record.tags | ForEach-Object { [string]$_ })
+        Availabilities = @($Record.availabilities)
+    }
+}
+
+function Get-ReleaseCommunicationRetirementDate {
+    param([Parameter(Mandatory = $true)]$Item)
+
+    $retirementAvailability = @($Item.Availabilities | Where-Object {
+            $_ -and $_.PSObject.Properties.Match('ring').Count -gt 0 -and [string]$_.ring -match '(?i)retire'
+        } | Select-Object -First 1)
+    if ($retirementAvailability.Count -eq 0) { return $null }
+
+    $availability = $retirementAvailability[0]
+    $year = if ($availability.PSObject.Properties.Match('year').Count -gt 0) { [int]$availability.year } else { 0 }
+    $monthText = if ($availability.PSObject.Properties.Match('month').Count -gt 0) { [string]$availability.month } else { '' }
+    $monthDate = [datetime]::MinValue
+    if ($year -lt 2000 -or [string]::IsNullOrWhiteSpace($monthText) -or -not [datetime]::TryParseExact("$monthText $year", 'MMMM yyyy', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$monthDate)) {
+        return $null
+    }
+
+    $text = "$([string]$Item.Title) $([string]$Item.Description)"
+    $datePatterns = @(
+        '\b\d{4}-\d{2}-\d{2}\b',
+        '\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b',
+        '\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b',
+        '\b\d{1,2}/\d{1,2}/\d{4}\b'
+    )
+    foreach ($pattern in $datePatterns) {
+        foreach ($match in [regex]::Matches($text, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            $candidateText = $match.Value -replace '(?i)(\d)(st|nd|rd|th)\b', '$1'
+            $candidate = [datetime]::MinValue
+            if ([datetime]::TryParse($candidateText, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$candidate) -and $candidate.Year -eq $year -and $candidate.Month -eq $monthDate.Month) {
+                return $candidate.ToString('yyyy-MM-dd')
+            }
+        }
+    }
+
+    return ([datetime]::new($year, $monthDate.Month, 1)).ToString('yyyy-MM-dd')
+}
+
+function Get-ReleaseCommunicationRetirementSeries {
+    param(
+        [Parameter(Mandatory = $false)][object[]]$Items = @(),
+        [Parameter(Mandatory = $false)][string[]]$SkuNames = @()
+    )
+
+    $seriesKeys = @($SkuNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { Convert-SkuToSeriesKey -SkuName $_ } | Where-Object { $_ } | Sort-Object -Unique)
+    $seriesByName = @{}
+    foreach ($item in @($Items)) {
+        if (-not $item) { continue }
+        $itemText = [System.Net.WebUtility]::HtmlDecode((([string]$item.Title, [string]$item.Description) -join ' '))
+        $itemTags = if ($item.PSObject.Properties.Match('Tags').Count -gt 0) { @($item.Tags | ForEach-Object { [string]$_ }) } else { @() }
+        if ('Pricing & Offerings' -in $itemTags -and $itemText -match '(?i)reserved\s+(?:virtual\s+machine|vm)\s+instances?|purchase|renewal') { continue }
+        $retireOn = Get-ReleaseCommunicationRetirementDate -Item $item
+        if (-not $retireOn) { continue }
+        $text = (([string]$item.Title, [string]$item.Description, (@($item.Categories) -join ' ')) -join ' ').ToLowerInvariant()
+        foreach ($seriesName in $seriesKeys) {
+            $matched = $false
+            foreach ($term in @(New-ReleaseCommunicationSeriesTerms -SeriesName $seriesName)) {
+                if (Test-ReleaseCommunicationSeriesMention -Text $text -Term $term) { $matched = $true; break }
+            }
+            if (-not $matched) { continue }
+
+            $entry = [pscustomobject]@{
+                SeriesName     = $seriesName
+                Status         = 'Announced'
+                RetireOn       = $retireOn
+                Announcement   = [string]$item.Link
+                MigrationGuide = [string]$item.Link
+                Notes          = 'Official Microsoft Release Communications SKU-family retirement matched to tenant inventory.'
+                Source         = 'ReleaseCommunicationsApi'
+                SourceUrl      = [string]$item.Link
+                AsOf           = (Get-Date).ToUniversalTime().ToString('o')
+                SourceGate     = 'ReleaseCommunicationsApi'
+                IsLive         = $true
+            }
+            if (-not $seriesByName.ContainsKey($seriesName) -or ([datetime]$retireOn) -lt ([datetime]$seriesByName[$seriesName].RetireOn)) {
+                $seriesByName[$seriesName] = $entry
+            }
+        }
+    }
+
+    return @($seriesByName.Values | Sort-Object SeriesName)
+}
+
+function Get-ReleaseCommunicationsApiItems {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [Parameter(Mandatory = $false)][int]$LookbackMonths = 12
+        [Parameter(Mandatory = $false)][int]$LookbackMonths = 0,
+        [Parameter(Mandatory = $false)][string]$CacheDir,
+        [Parameter(Mandatory = $false)][bool]$UseCache = $false,
+        [Parameter(Mandatory = $false)][int]$CacheTtlHours = 24,
+        [Parameter(Mandatory = $false)][bool]$ForceRefresh = $false
     )
 
     $checkedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
-    $cutoffDate = (Get-Date).ToUniversalTime().AddMonths(-1 * [math]::Max(1, $LookbackMonths))
-    $fetchStart = Get-Date
-    try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-        $xmlText = ([string]$response.Content).TrimStart([char]0xFEFF)
-        $rss = New-Object 'System.Xml.XmlDocument'
-        $rss.PreserveWhitespace = $false
-        $rss.LoadXml($xmlText)
-        Add-ApiCallLog -Api 'Invoke-WebRequest' -Provider 'MicrosoftReleaseCommunications' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request $Url -StartedAt $fetchStart -EndedAt (Get-Date) -Success $true -Meta @{ ContentLength = $xmlText.Length; LookbackMonths = $LookbackMonths }
+    $cutoffDate = if ($LookbackMonths -gt 0) { (Get-Date).ToUniversalTime().AddMonths(-1 * $LookbackMonths) } else { $null }
+    $apiBaseUrl = $Url.Split('?')[0].TrimEnd('/')
+    $cacheContext = [ordered]@{ source = $Url; schema = 1 }
+    $indexCachePath = if ($UseCache -and $CacheDir) { New-CacheFilePath -CacheDir $CacheDir -Prefix 'release_communications_retirements_index' -Context $cacheContext } else { $null }
+    $detailCacheDir = if ($UseCache -and $CacheDir) { Join-Path $CacheDir 'release_communications_retirement_details' } else { $null }
+    if ($detailCacheDir) { New-DirectoryIfMissing -Path $detailCacheDir }
 
-        $items = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in @($rss.rss.channel.item)) {
-            if (-not $item) { continue }
-            $published = [datetime]::MinValue
-            $publishedText = if ($item.pubDate) { [string]$item.pubDate } else { '' }
-            if (-not [datetime]::TryParse($publishedText, [ref]$published)) { $published = [datetime]::MinValue }
-            if ($published -ne [datetime]::MinValue -and $published.ToUniversalTime() -lt $cutoffDate) { continue }
-            $categories = @($item.category | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            $items.Add([pscustomobject]@{
-                Guid          = if ($item.guid) { [string]$item.guid.'#text' } else { '' }
-                Title         = if ($item.title) { [string]$item.title } else { '' }
-                Description   = if ($item.description) { [string]$item.description } else { '' }
-                Link          = if ($item.link) { [string]$item.link } else { '' }
-                PublishedDate = if ($published -ne [datetime]::MinValue) { $published.ToUniversalTime().ToString('yyyy-MM-dd') } else { 'N/A' }
-                Categories    = @($categories)
-            }) | Out-Null
+    $indexEnvelope = if ($indexCachePath -and (Test-Path -LiteralPath $indexCachePath)) { Read-CacheEnvelope -Path $indexCachePath } else { $null }
+    $hasValidIndex = ($indexEnvelope -and $indexEnvelope.Data -and $indexEnvelope.Data.PSObject.Properties.Match('Records').Count -gt 0)
+    [object[]]$cachedRecords = @(if ($hasValidIndex) { $indexEnvelope.Data.Records })
+    $cacheIsFresh = ($hasValidIndex -and $indexCachePath -and (-not $ForceRefresh) -and (Test-CacheFileFresh -Path $indexCachePath -TtlHours $CacheTtlHours))
+    $syncMode = if ($cacheIsFresh) { 'CacheHit' } elseif ($cachedRecords.Count -gt 0 -and -not $ForceRefresh) { 'DeltaRefresh' } else { 'FullRefresh' }
+    $pageCount = 0
+    $changedIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $syncWatermarkUtc = (Get-Date).ToUniversalTime().ToString('o')
+
+    try {
+        if (-not $cacheIsFresh) {
+            $requestUrl = $Url
+            if ($syncMode -eq 'DeltaRefresh') {
+                $lastWatermark = if ($indexEnvelope.Data.PSObject.Properties.Match('LastSyncWatermarkUtc').Count -gt 0) { [string]$indexEnvelope.Data.LastSyncWatermarkUtc } else { [string]$indexEnvelope.CachedAtUtc }
+                $watermark = [uri]::EscapeDataString(([datetime]$lastWatermark).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
+                if ($requestUrl -match '(?i)(\$filter=[^&]+)') {
+                    $requestUrl = $requestUrl -replace '(?i)(\$filter=[^&]+)', "`$1%20and%20modified%20gt%20$watermark"
+                }
+                else {
+                    $separator = if ($requestUrl.Contains('?')) { '&' } else { '?' }
+                    $requestUrl += "$separator`$filter=modified%20gt%20$watermark"
+                }
+            }
+            if ($requestUrl -notmatch '(?i)(?:\?|&)\$orderby=') {
+                $separator = if ($requestUrl.Contains('?')) { '&' } else { '?' }
+                $requestUrl += "$separator`$orderby=modified%20desc"
+            }
+            $currentRequestUrl = $requestUrl
+            $downloadedRecords = New-Object 'System.Collections.Generic.List[object]'
+            do {
+                if ($pageCount -ge 100) { throw 'Release Communications API pagination exceeded 100 pages.' }
+                $pageStart = Get-Date
+                $response = Invoke-WebRequest -Uri $currentRequestUrl -UseBasicParsing -Headers @{ Accept = 'application/json' } -TimeoutSec 30 -ErrorAction Stop
+                $jsonText = ([string]$response.Content).TrimStart([char]0xFEFF)
+                $payload = $jsonText | ConvertFrom-Json -ErrorAction Stop
+                if ($payload.PSObject.Properties.Match('value').Count -eq 0) { throw "Release Communications API response does not contain a 'value' collection." }
+                foreach ($record in @($payload.value)) {
+                    if (-not $record -or -not $record.id) { continue }
+                    $downloadedRecords.Add($record) | Out-Null
+                    [void]$changedIds.Add([string]$record.id)
+                }
+                $pageCount++
+                Add-ApiCallLog -Api 'Invoke-WebRequest' -Provider 'MicrosoftReleaseCommunications' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request $currentRequestUrl -StartedAt $pageStart -EndedAt (Get-Date) -Success $true -Meta @{ ContentLength = $jsonText.Length; SyncMode = $syncMode; Page = $pageCount; ItemCount = @($payload.value).Count }
+                $currentRequestUrl = if ($payload.PSObject.Properties.Match('@odata.nextLink').Count -gt 0) { [string]$payload.'@odata.nextLink' } else { '' }
+            } while (-not [string]::IsNullOrWhiteSpace($currentRequestUrl))
+
+            if ($syncMode -eq 'DeltaRefresh') {
+                $recordMap = @{}
+                foreach ($record in $cachedRecords) { if ($record.id) { $recordMap[[string]$record.id] = $record } }
+                foreach ($record in @($downloadedRecords.ToArray())) { $recordMap[[string]$record.id] = $record }
+                $cachedRecords = @($recordMap.Values)
+            }
+            else {
+                $cachedRecords = @($downloadedRecords.ToArray())
+            }
         }
+
+        $details = New-Object 'System.Collections.Generic.List[object]'
+        $detailTotal = @($cachedRecords).Count
+        $detailIndex = 0
+        $detailDownloadCount = 0
+        $detailCacheHitCount = 0
+        $detailTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($record in $cachedRecords) {
+            $detailIndex++
+            if (-not $record -or -not $record.id) { continue }
+            $id = [string]$record.id
+            $detailPath = if ($detailCacheDir) { New-CacheFilePath -CacheDir $detailCacheDir -Prefix 'retirement' -Context @{ id = $id } } else { $null }
+            $detailEnvelope = if ($detailPath -and (Test-Path -LiteralPath $detailPath)) { Read-CacheEnvelope -Path $detailPath } else { $null }
+            $mustDownloadDetail = (-not $detailEnvelope -or $changedIds.Contains($id) -or $ForceRefresh)
+            $detailPercent = if ($detailTotal -gt 0) { [int][math]::Floor((($detailIndex - 1) / $detailTotal) * 100) } else { 100 }
+            $detailAction = if ($mustDownloadDetail) { 'Downloading' } else { 'Reading cache' }
+            Write-Progress -Id 17 -ParentId 1 -Activity 'Release Communications retirement details' -Status "$detailAction $detailIndex/$detailTotal (ID $id; downloaded $detailDownloadCount; cached $detailCacheHitCount)" -PercentComplete $detailPercent
+            if ($mustDownloadDetail) {
+                $detailUrl = "$apiBaseUrl/$([uri]::EscapeDataString($id))"
+                $detailStart = Get-Date
+                $detailResponse = Invoke-WebRequest -Uri $detailUrl -UseBasicParsing -Headers @{ Accept = 'application/json' } -TimeoutSec 30 -ErrorAction Stop
+                $detail = ([string]$detailResponse.Content).TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+                $detailDownloadCount++
+                Add-ApiCallLog -Api 'Invoke-WebRequest' -Provider 'MicrosoftReleaseCommunicationsDetail' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request $detailUrl -StartedAt $detailStart -EndedAt (Get-Date) -Success $true -Meta @{ Id = $id; SyncMode = $syncMode }
+                if ($detailPath) { Save-CacheEnvelope -Path $detailPath -CacheKind 'ReleaseCommunicationRetirementDetail' -Context @{ id = $id; source = $detailUrl } -Data $detail }
+            }
+            else {
+                $detail = $detailEnvelope.Data
+                $detailCacheHitCount++
+            }
+            if ($detail) { $details.Add($detail) | Out-Null }
+            $detailPercent = if ($detailTotal -gt 0) { [int][math]::Floor(($detailIndex / $detailTotal) * 100) } else { 100 }
+            $detailSecondsRemaining = if ($detailIndex -gt 0) { [int][math]::Max(0, [math]::Round(($detailTimer.Elapsed.TotalSeconds / $detailIndex) * ($detailTotal - $detailIndex), 0)) } else { 0 }
+            Write-Progress -Id 17 -ParentId 1 -Activity 'Release Communications retirement details' -Status "Processed $detailIndex/$detailTotal (downloaded $detailDownloadCount; cached $detailCacheHitCount)" -PercentComplete $detailPercent -SecondsRemaining $detailSecondsRemaining
+        }
+        $detailTimer.Stop()
+        Write-Progress -Id 17 -ParentId 1 -Activity 'Release Communications retirement details' -Status "Completed - $detailTotal processed; $detailDownloadCount downloaded; $detailCacheHitCount cached" -Completed
+
+        if ($indexCachePath -and -not $cacheIsFresh) {
+            Save-CacheEnvelope -Path $indexCachePath -CacheKind 'ReleaseCommunicationRetirementIndex' -Context $cacheContext -Data ([pscustomobject]@{ LastSyncWatermarkUtc = $syncWatermarkUtc; Records = @($cachedRecords) })
+        }
+
+        $items = @($details.ToArray() | ForEach-Object { ConvertFrom-ReleaseCommunicationApiRecord -Record $_ -ApiBaseUrl $apiBaseUrl } | Where-Object {
+            if ($null -eq $cutoffDate -or $_.ModifiedUtc -eq 'N/A') { return $true }
+            return (([datetime]$_.ModifiedUtc) -ge $cutoffDate)
+            })
 
         return [pscustomobject]@{
             Ok             = $true
@@ -2073,15 +2324,20 @@ function Get-ReleaseCommunicationsRssItems {
             Url            = $Url
             CheckedAtUtc   = $checkedAtUtc
             LookbackMonths = $LookbackMonths
-            Items          = @($items.ToArray())
+            Items          = @($items)
+            PageCount      = $pageCount
+            CachedTotal    = @($cachedRecords).Count
+            DetailUpdates  = $changedIds.Count
+            CacheMode      = $syncMode
             Error          = 'N/A'
         }
     }
     catch {
+        Write-Progress -Id 17 -ParentId 1 -Activity 'Release Communications retirement details' -Status 'Stopped' -Completed
         $errorMessage = $_.Exception.Message
         if ($errorMessage.Length -gt 500) { $errorMessage = $errorMessage.Substring(0, 500) + '...' }
-        Add-ApiCallLog -Api 'Invoke-WebRequest' -Provider 'MicrosoftReleaseCommunications' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request $Url -StartedAt $fetchStart -EndedAt (Get-Date) -Success $false -ErrorMessage $errorMessage -Meta @{ LookbackMonths = $LookbackMonths }
-        Write-Log "Release Communications RSS unavailable; continuing without RSS context. $errorMessage" 'WARN'
+        Add-ApiCallLog -Api 'Invoke-WebRequest' -Provider 'MicrosoftReleaseCommunications' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request $Url -StartedAt (Get-Date) -EndedAt (Get-Date) -Success $false -ErrorMessage $errorMessage -Meta @{ SyncMode = $syncMode; Page = ($pageCount + 1) }
+        Write-Log "Release Communications API unavailable; continuing without official communications context. $errorMessage" 'WARN'
         return [pscustomobject]@{
             Ok             = $false
             Status         = 'Unavailable'
@@ -2089,6 +2345,10 @@ function Get-ReleaseCommunicationsRssItems {
             CheckedAtUtc   = $checkedAtUtc
             LookbackMonths = $LookbackMonths
             Items          = @()
+            PageCount      = $pageCount
+            CachedTotal    = @($cachedRecords).Count
+            DetailUpdates  = $changedIds.Count
+            CacheMode      = $syncMode
             Error          = $errorMessage
         }
     }
@@ -2122,7 +2382,12 @@ function Get-ReleaseCommunicationsPreview {
     param(
         [Parameter(Mandatory = $false)][bool]$Enabled = $true,
         [Parameter(Mandatory = $true)][string]$Url,
-        [Parameter(Mandatory = $false)][int]$LookbackMonths = 12,
+        [Parameter(Mandatory = $false)][int]$LookbackMonths = 0,
+        [Parameter(Mandatory = $false)][string]$CacheDir,
+        [Parameter(Mandatory = $false)][bool]$UseCache = $false,
+        [Parameter(Mandatory = $false)][int]$CacheTtlHours = 24,
+        [Parameter(Mandatory = $false)][bool]$ForceRefresh = $false,
+        [Parameter(Mandatory = $false)]$ApiResult,
         [Parameter(Mandatory = $false)][object[]]$Rows = @(),
         [Parameter(Mandatory = $false)]$BatchPoolPreview,
         [Parameter(Mandatory = $false)]$VmssPreview,
@@ -2134,9 +2399,12 @@ function Get-ReleaseCommunicationsPreview {
         return [pscustomobject]@{ Ok = $false; Status = 'Disabled'; Url = $Url; CheckedAtUtc = $checkedAtUtc; LookbackMonths = $LookbackMonths; TotalItems = 0; RelevantCount = 0; CorroboratedCount = 0; FinOpsCount = 0; ReviewOnlyCount = 0; Rows = @(); Error = 'Disabled by parameter' }
     }
 
-    $rssResult = Get-ReleaseCommunicationsRssItems -Url $Url -LookbackMonths $LookbackMonths
-    if (-not $rssResult.Ok) {
-        return [pscustomobject]@{ Ok = $false; Status = $rssResult.Status; Url = $Url; CheckedAtUtc = $rssResult.CheckedAtUtc; LookbackMonths = $LookbackMonths; TotalItems = 0; RelevantCount = 0; CorroboratedCount = 0; FinOpsCount = 0; ReviewOnlyCount = 0; Rows = @(); Error = $rssResult.Error }
+    $apiResult = $ApiResult
+    if (-not $apiResult) {
+        $apiResult = Get-ReleaseCommunicationsApiItems -Url $Url -LookbackMonths $LookbackMonths -CacheDir $CacheDir -UseCache $UseCache -CacheTtlHours $CacheTtlHours -ForceRefresh $ForceRefresh
+    }
+    if (-not $apiResult.Ok) {
+        return [pscustomobject]@{ Ok = $false; Status = $apiResult.Status; Url = $Url; CheckedAtUtc = $apiResult.CheckedAtUtc; LookbackMonths = $LookbackMonths; TotalItems = 0; RelevantCount = 0; CorroboratedCount = 0; FinOpsCount = 0; ReviewOnlyCount = 0; Rows = @(); Error = $apiResult.Error }
     }
 
     $resourceIds = New-Object 'System.Collections.Generic.List[string]'
@@ -2145,7 +2413,7 @@ function Get-ReleaseCommunicationsPreview {
         if (-not $row) { continue }
         $gate = if ($row.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$row.RetirementSourceGate } else { '' }
         $evidence = if ($row.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$row.EvidenceSource } else { '' }
-        $isRetirement = ($gate -eq 'LiveAdvisorArg' -or $gate -eq 'LiveLearnMarkdown' -or $evidence -eq 'AdvisorSignalOnly' -or $evidence -eq 'LiveLearnMarkdown' -or $evidence -eq 'LiveLearnMarkdown + AdvisorSignal')
+        $isRetirement = ($gate -eq 'LiveAdvisorArg' -or $gate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $evidence -eq 'AdvisorSignalOnly' -or $evidence -in @('LiveLearnMarkdown', 'LiveLearnMarkdown + AdvisorSignal', 'ReleaseCommunicationsApi', 'ReleaseCommunicationsApi + AdvisorSignal'))
         if (-not $isRetirement) { continue }
         if ($row.PSObject.Properties.Match('SubscriptionId').Count -gt 0 -and $row.PSObject.Properties.Match('ResourceGroup').Count -gt 0 -and $row.PSObject.Properties.Match('VmName').Count -gt 0) {
             $resourceIds.Add(('/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Compute/virtualMachines/{2}' -f [string]$row.SubscriptionId, [string]$row.ResourceGroup, [string]$row.VmName).ToLowerInvariant()) | Out-Null
@@ -2165,7 +2433,7 @@ function Get-ReleaseCommunicationsPreview {
     $resourceIds = @($resourceIds.ToArray() | Select-Object -Unique)
 
     $notices = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($item in @($rssResult.Items)) {
+    foreach ($item in @($apiResult.Items)) {
         $title = [string]$item.Title
         $description = [string]$item.Description
         $categories = @($item.Categories)
@@ -2173,8 +2441,6 @@ function Get-ReleaseCommunicationsPreview {
         $hasRetirementVerb = ($text -match '(?i)\b(retire|retirement|retiring|deprecated|deprecation|end of support|end-of-support)\b')
         $hasFinOpsSignal = ($text -match '(?i)\b(reserved|reservation|reserved vm instance|savings plan|price|pricing|billing|purchase|renewal|offer|commercial)\b')
         $hasComputeSignal = ($text -match '(?i)\b(virtual machine|virtual machines|\bvm\b|vmss|scale set|batch|compute|sku|size|sizes)\b')
-        if (-not ($hasRetirementVerb -or $hasFinOpsSignal -or $hasComputeSignal)) { continue }
-
         $matchedTopic = 'Review-only official notice'
         $bucket = 'Review-only'
         $usage = 'Read-only: official notice was not mapped deterministically to a report resource or SKU-family. Excluded from counts, waves and backlog.'
@@ -2200,10 +2466,6 @@ function Get-ReleaseCommunicationsPreview {
             $matchedTopic = 'Commercial / reservation / pricing notice'
             $usage = 'FinOps context only. Does not create a technical retirement finding.'
         }
-        elseif (-not $hasRetirementVerb -and -not $hasComputeSignal) {
-            continue
-        }
-
         $service = if ($categories.Count -gt 0) { ($categories | Select-Object -Last 1) } else { 'Azure' }
         $notices.Add([pscustomobject]@{
             Bucket        = $bucket
@@ -2223,15 +2485,14 @@ function Get-ReleaseCommunicationsPreview {
             @{ Expression = {
                     $published = [datetime]::MinValue
                     if ([datetime]::TryParse([string]$_.PublishedDate, [ref]$published)) { $published } else { [datetime]::MinValue }
-                }; Descending = $true } |
-        Select-Object -First 30)
+                }; Descending = $true })
     return [pscustomobject]@{
         Ok                = $true
         Status            = 'OK'
         Url               = $Url
-        CheckedAtUtc      = $rssResult.CheckedAtUtc
+        CheckedAtUtc      = $apiResult.CheckedAtUtc
         LookbackMonths    = $LookbackMonths
-        TotalItems        = @($rssResult.Items).Count
+        TotalItems        = @($apiResult.Items).Count
         RelevantCount     = $rows.Count
         CorroboratedCount = @($rows | Where-Object { $_.Bucket -eq 'Corroborated' }).Count
         FinOpsCount       = @($rows | Where-Object { $_.Bucket -eq 'FinOps' }).Count
@@ -2817,7 +3078,7 @@ function Resolve-OfficialRetirementLiveOnly {
     .DESCRIPTION
     Priority:
     1. LiveAdvisorArg: per-resource Advisor recommendation (Stream A)
-    2. LiveLearnMarkdown: SKU-family retirement from Learn (Stream B)
+    2. Official SKU-family retirement from Learn (Stream B) or Release Communications (Stream C)
     
     **NO FALLBACK.** If neither source covers the SKU, return $null.
     If caller requires live and both sources are unavailable, **caller throws**.
@@ -2842,13 +3103,13 @@ function Resolve-OfficialRetirementLiveOnly {
             return [pscustomobject]@{
                 Status         = [string]$seriesEntry.Status
                 RetireOn       = $seriesEntry.RetireOn
-                Source         = "LiveLearnMarkdown"
+                Source         = if ($seriesEntry.PSObject.Properties.Match('Source').Count -gt 0 -and $seriesEntry.Source) { [string]$seriesEntry.Source } else { 'LiveLearnMarkdown' }
                 SeriesName     = $seriesKey
                 SourceUrl      = $seriesEntry.SourceUrl
                 AsOf           = $seriesEntry.AsOf
                 MigrationGuide = $seriesEntry.MigrationGuide
                 Announcement   = $seriesEntry.Announcement
-                SourceGate     = "LiveLearnMarkdown"
+                SourceGate     = if ($seriesEntry.PSObject.Properties.Match('SourceGate').Count -gt 0 -and $seriesEntry.SourceGate) { [string]$seriesEntry.SourceGate } else { 'LiveLearnMarkdown' }
                 IsLive         = $true
             }
         }
@@ -3046,12 +3307,13 @@ function Get-Retirements {
     Load retirement data from LIVE sources only (no fallback).
     
     .DESCRIPTION
-    Combines two live streams:
+    Combines three live streams:
     - STREAM A: Live Advisor ARG (per-resource recommendations)
     - STREAM B: Live Microsoft Learn markdown (SKU-family retirement waves)
+    - STREAM C: Microsoft Release Communications API (SKU-family retirement announcements)
     
-    Both are fetched; if both fail and $RequireLiveRetirementSource=true, script throws.
-    If only one fails, logs WARN and returns the available stream.
+    Enabled streams are fetched; if all fail and $RequireLiveRetirementSource=true, script throws.
+    If one or more fail, logs WARN and returns the available streams.
     
     No hardcoded list fallback — all retirement data is live or absent.
     #>
@@ -3061,10 +3323,13 @@ function Get-Retirements {
         [Parameter(Mandatory = $false)][string[]]$Subscriptions,
         [Parameter(Mandatory = $false)][string[]]$AdvisorRetirementTypeIdBlocklist = @(),
         [Parameter(Mandatory = $false)][string]$AdvisorRetirementNameBlockPattern = '',
-        [Parameter(Mandatory = $false)][bool]$RequireLiveRetirementSource = $false
+        [Parameter(Mandatory = $false)][bool]$RequireLiveRetirementSource = $false,
+        [Parameter(Mandatory = $false)][object[]]$ReleaseCommunicationItems = @(),
+        [Parameter(Mandatory = $false)][string[]]$InventorySkuNames = @(),
+        [Parameter(Mandatory = $false)][bool]$ReleaseCommunicationsOk = $false
     )
 
-    Write-Log "Load-Retirements: Starting LIVE-ONLY mode (no fallback). Streams: ARG (per-resource) + Learn (SKU-family). RequireLiveRetirementSource=$RequireLiveRetirementSource" "INFO"
+    Write-Log "Load-Retirements: Starting LIVE-ONLY mode (no fallback). Streams: ARG (per-resource) + Learn (SKU-family) + Release Communications (SKU-family). RequireLiveRetirementSource=$RequireLiveRetirementSource" "INFO"
 
     $liveAdvisorArg = $null
     $liveAdvisorArgOk = $false
@@ -3116,14 +3381,14 @@ function Get-Retirements {
     # ========================================
     # CHECK REQUIREMENTS: Do we have the sources we need?
     # ========================================
-    if ($RequireLiveRetirementSource -and -not $liveAdvisorArgOk -and -not $liveLearnMarkdownOk) {
-        $msg = "FATAL: RequireLiveRetirementSource=true but both live sources failed. STREAM A error: $liveAdvisorArgError. STREAM B error: $liveLearnMarkdownError. No retirement data available; refusing to proceed."
+    if ($RequireLiveRetirementSource -and -not $liveAdvisorArgOk -and -not $liveLearnMarkdownOk -and -not $ReleaseCommunicationsOk) {
+        $msg = "FATAL: RequireLiveRetirementSource=true but all live sources failed. STREAM A error: $liveAdvisorArgError. STREAM B error: $liveLearnMarkdownError. STREAM C unavailable. No retirement data available; refusing to proceed."
         Write-Log $msg "ERROR"
         throw $msg
     }
 
     # ========================================
-    # BUILD OUTPUT (combine both live streams)
+    # BUILD OUTPUT (combine all available live streams)
     # ========================================
     $portalByVmResourceId = @{}
     $seriesEntries = @()
@@ -3165,12 +3430,28 @@ function Get-Retirements {
         }
     }
 
+    # Add STREAM C entries (Microsoft Release Communications API, SKU-family).
+    # Learn keeps priority for a family already present in Exact/Series; Stream C fills only uncovered families.
+    $releaseCommunicationSeries = @(Get-ReleaseCommunicationRetirementSeries -Items $ReleaseCommunicationItems -SkuNames $InventorySkuNames)
+    $streamCAddedCount = 0
+    $streamCSupersededByLearnCount = 0
+    foreach ($entry in $releaseCommunicationSeries) {
+        $alreadyCovered = @($seriesEntries | Where-Object { [string]$_.SeriesName -eq [string]$entry.SeriesName }).Count -gt 0
+        if ($alreadyCovered) {
+            $streamCSupersededByLearnCount++
+            continue
+        }
+        $seriesEntries += $entry
+        $streamCAddedCount++
+    }
+    Write-Log "Load-Retirements: STREAM C succeeded. Tenant-matched series=$($releaseCommunicationSeries.Count); added=$streamCAddedCount; superseded by Learn=$streamCSupersededByLearnCount." "INFO"
+
     # Fetch monitoring lifecycle (via ARG if available)
     if ($liveAdvisorArgOk -and $liveAdvisorArg -and $liveAdvisorArg.PSObject.Properties.Match("MonitoringLifecycle").Count -gt 0) {
         $monitoringLifecycle = @($liveAdvisorArg.MonitoringLifecycle)
     }
 
-    Write-Log "Load-Retirements: Complete. STREAM A OK=$liveAdvisorArgOk STREAM B OK=$liveLearnMarkdownOk. SeriesEntries=$(@($seriesEntries).Count) ByVmResourceId=$($portalByVmResourceId.Count) Exact=$($exact.Count)" "INFO"
+    Write-Log "Load-Retirements: Complete. STREAM A OK=$liveAdvisorArgOk STREAM B OK=$liveLearnMarkdownOk STREAM C OK=$ReleaseCommunicationsOk Matched=$($releaseCommunicationSeries.Count) Added=$streamCAddedCount. SeriesEntries=$(@($seriesEntries).Count) ByVmResourceId=$($portalByVmResourceId.Count) Exact=$($exact.Count)" "INFO"
 
     return [pscustomobject]@{
         Exact              = $exact
@@ -3181,6 +3462,8 @@ function Get-Retirements {
         StreamBOk          = $liveLearnMarkdownOk
         StreamAError       = $liveAdvisorArgError
         StreamBError       = $liveLearnMarkdownError
+        StreamCOk          = $ReleaseCommunicationsOk
+        StreamCSeriesCount = $releaseCommunicationSeries.Count
     }
 }
 
@@ -3745,6 +4028,7 @@ function Get-RetirementEvidence {
 
     switch -Regex ($source) {
         "OfficialMicrosoftLearn|LiveLearnMarkdown" { return [pscustomobject]@{ EvidenceType = "PublicOfficialAnnouncement"; Confidence = "High" } }
+        "ReleaseCommunicationsApi" { return [pscustomobject]@{ EvidenceType = "PublicOfficialAnnouncement"; Confidence = "High" } }
         "LiveAdvisorArg" { return [pscustomobject]@{ EvidenceType = "TenantSpecificAdvisorSignal"; Confidence = "High" } }
         default { return [pscustomobject]@{ EvidenceType = "UnknownSource"; Confidence = "Low" } }
     }
@@ -4182,10 +4466,10 @@ function Build-Recommendations {
                 RetirementStatus       = if ($retirement) { $retirement.Status } else { 'Unknown' }
                 RetirementDate         = $effectiveRetirementDate
                 RetirementSource       = if ($retirement -and $retirement.PSObject.Properties.Match('Source').Count -gt 0) { [string]$retirement.Source } else { 'N/A' }
-                RetirementSourceGate   = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'LiveAdvisorArg' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'N/A' }
+                RetirementSourceGate   = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'LiveAdvisorArg' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement' -and $retirement.Source -eq 'ReleaseCommunicationsApi') { 'ReleaseCommunicationsApi' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'N/A' }
                 RetirementEvidenceType = $retirementEvidence.EvidenceType
                 RetirementEvidenceConfidence = $retirementEvidence.Confidence
-                EvidenceSource         = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'AdvisorSignalOnly' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'NoSignal' }
+                EvidenceSource         = if ($retirementEvidence.EvidenceType -eq 'TenantSpecificAdvisorSignal') { 'AdvisorSignalOnly' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement' -and $retirement.Source -eq 'ReleaseCommunicationsApi') { 'ReleaseCommunicationsApi' } elseif ($retirementEvidence.EvidenceType -eq 'PublicOfficialAnnouncement') { 'LiveLearnMarkdown' } else { 'NoSignal' }
                 OfficialRetirementDate = $effectiveRetirementDate
                 AdvisorRetirementSignalDate = 'N/A'
                 RetirementRiskLevel    = $retirementRisk.Level
@@ -4586,16 +4870,16 @@ function Build-Recommendations {
 
         $retirementEvidence = Get-RetirementEvidence -RetirementEntry $retirement
 
-        # LIVE-ONLY: Use Resolve-OfficialRetirementLiveOnly (no fallback to hardcoded list)
-        # Extract live Learn series from retirements object
-        $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match("Source").Count -gt 0 -and $_.Source -eq "LiveLearnMarkdown" })
+        # LIVE-ONLY: official SKU-family sources are Learn and Release Communications.
+        $liveSeries = @($Retirements.Series | Where-Object { $_.PSObject.Properties.Match("Source").Count -gt 0 -and $_.Source -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') })
         $officialLiveRetirement = Resolve-OfficialRetirementLiveOnly -SkuName ([string]$vm.VmSize) -LiveLearnSeries $liveSeries
         
         $advisorSignalPresent = ($retirement -and $retirementEvidence.EvidenceType -eq "TenantSpecificAdvisorSignal")
 
         if ($officialLiveRetirement) {
             $officialRetirementDate = Format-NullableDate $officialLiveRetirement.RetireOn
-            $evidenceSource = if ($advisorSignalPresent) { "LiveLearnMarkdown + AdvisorSignal" } else { "LiveLearnMarkdown" }
+            $officialSourceName = [string]$officialLiveRetirement.Source
+            $evidenceSource = if ($advisorSignalPresent) { "$officialSourceName + AdvisorSignal" } else { $officialSourceName }
             $effectiveEvidenceType = "PublicOfficialAnnouncement"
         }
         elseif ($advisorSignalPresent) {
@@ -4651,10 +4935,9 @@ function Build-Recommendations {
             Write-Log "Commitment retirement impact: $($vm.VmName) ($($vm.VmSize)) has $commitmentRetirementKinds coverage and retires $effectiveRetirementDate." "WARN"
         }
 
-        # Source gate: LIVE-ONLY (no fallback to hardcoded list)
-        # Only two sources: LiveAdvisorArg (Advisor ARG) or LiveLearnMarkdown (Microsoft Learn)
+        # Source gate: LIVE-ONLY (no fallback to hardcoded list).
         if ($effectiveEvidenceType -eq "PublicOfficialAnnouncement" -and $officialLiveRetirement) {
-            $retirementSourceGate = "LiveLearnMarkdown"
+            $retirementSourceGate = if ($officialLiveRetirement.SourceGate) { [string]$officialLiveRetirement.SourceGate } else { [string]$officialLiveRetirement.Source }
             $retirementSourceAsOf = (Get-Date).ToString("yyyy-MM-dd")
         } elseif ($effectiveEvidenceType -eq "TenantSpecificAdvisorSignal") {
             $retirementSourceGate = "LiveAdvisorArg"
@@ -4771,7 +5054,7 @@ function Build-Recommendations {
             RetirementDate         = $effectiveRetirementDate
             RetirementSource       = $effectiveRetirementSource
             RetirementSourceGate   = $retirementSourceGate
-            RetirementEvidenceScope = if ($retirementSourceGate -eq "LiveAdvisorArg") { "Per-resource confirmed (Advisor ARG)" } elseif ($retirementSourceGate -eq "LiveLearnMarkdown") { "SKU-family exposure (Microsoft Learn) - verify this VM's scope in Workbook" } else { "No live evidence" }
+            RetirementEvidenceScope = if ($retirementSourceGate -eq "LiveAdvisorArg") { "Per-resource confirmed (Advisor ARG)" } elseif ($retirementSourceGate -eq "LiveLearnMarkdown") { "SKU-family exposure (Microsoft Learn) - verify this VM's scope in Workbook" } elseif ($retirementSourceGate -eq 'ReleaseCommunicationsApi') { 'SKU-family exposure (Microsoft Release Communications) - verify impacted resources in Service Health' } else { "No live evidence" }
             RetirementSourceAsOf   = $retirementSourceAsOf
             RetirementEvidenceType = $effectiveEvidenceType
             RetirementEvidenceConfidence = $retirementEvidence.Confidence
@@ -4837,7 +5120,7 @@ function Export-BacklogItems {
             $gate = if ($_.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$_.RetirementSourceGate } else { '' }
             $retirementDate = if ($_.PSObject.Properties.Match('RetirementDate').Count -gt 0) { [string]$_.RetirementDate } else { '' }
             $hasRetirementDate = (-not [string]::IsNullOrWhiteSpace($retirementDate) -and $retirementDate -notin @('N/A', 'No live retirement source'))
-            ($risk -in @('Critical', 'High') -or $gate -in @('LiveAdvisorArg', 'LiveLearnMarkdown') -or $hasRetirementDate)
+            ($risk -in @('Critical', 'High') -or $gate -in @('LiveAdvisorArg', 'LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $hasRetirementDate)
         } |
         Select-Object @(
             @{ Name = "Title"; Expression = { "SKU modernization - " + $_.VmName } },
@@ -4996,7 +5279,9 @@ function ConvertTo-NormalizedMonitoringLifecycleRows {
     } }
 
     foreach ($group in $groups) {
-        $items = @($group.Group)
+        $items = @($group.Group | Sort-Object @{ Expression = {
+                        if ($_.PSObject.Properties.Match('RetireOn').Count -gt 0 -and $_.RetireOn -and [string]$_.RetireOn -ne 'N/A') { 0 } else { 1 }
+                    } })
         $selected = $items | Select-Object -First 1
         $discarded = @($items | Select-Object -Skip 1)
         foreach ($duplicate in $discarded) {
@@ -5008,7 +5293,7 @@ function ConvertTo-NormalizedMonitoringLifecycleRows {
         $normalized.Add([pscustomobject]@{
             ResourceId                  = if ($selected.PSObject.Properties.Match('ResourceId').Count -gt 0) { [string]$selected.ResourceId } else { '' }
             Feature                     = 'DependencyAgentVmInsightsMap'
-            RetireOn                    = '2028-06-30'
+            RetireOn                    = if ($selected.PSObject.Properties.Match('RetireOn').Count -gt 0 -and $selected.RetireOn) { [string]$selected.RetireOn } else { 'N/A' }
             AdvisorRecommendationId     = if ($selected.PSObject.Properties.Match('AdvisorRecommendationId').Count -gt 0) { [string]$selected.AdvisorRecommendationId } else { 'N/A' }
             AdvisorRecommendationName   = if ($selected.PSObject.Properties.Match('AdvisorRecommendationName').Count -gt 0) { [string]$selected.AdvisorRecommendationName } else { 'Dependency Agent / VM Insights Map' }
             AdvisorRecommendationTypeId = if ($selected.PSObject.Properties.Match('AdvisorRecommendationTypeId').Count -gt 0) { [string]$selected.AdvisorRecommendationTypeId } else { 'N/A' }
@@ -5041,11 +5326,13 @@ function ConvertTo-MonitoringLifecycleTrackHtml {
     $html += "<details>"
     $html += "<summary><h2 style='display:inline; margin:0; font-size:16px'>Monitoring Lifecycle (separate track - not a compute SKU retirement)</h2></summary>"
     $html += "<div class='details-content'>"
-    $html += "<p><strong>Azure Monitor VM Insights &lsquo;Map&rsquo; feature &amp; Dependency Agent retire on 2028-06-30.</strong> "
+    $retirementDates = @($rows | Where-Object { $_.RetireOn -and $_.RetireOn -ne 'N/A' } | ForEach-Object { [string]$_.RetireOn } | Sort-Object -Unique)
+    $retirementDateText = if ($retirementDates.Count -gt 0) { $retirementDates -join ', ' } else { 'N/A (Advisor did not provide a retirement date)' }
+    $html += "<p><strong>Azure Monitor VM Insights &lsquo;Map&rsquo; feature &amp; Dependency Agent retirement date: $retirementDateText.</strong> "
     $html += "This is an <strong>Azure Monitor feature</strong> retirement, <strong>not</strong> a retirement of the VM or its compute SKU. It is tracked here separately so it is neither lost nor mistaken for a SKU retirement.</p>"
     $html += "<ul style='font-size:13px'>"
     $html += "<li><strong>No direct replacement.</strong> Azure Monitor Agent (AMA) does <strong>not</strong> replace the Map feature; AMA covers inventory tracking only. Process/dependency mapping requires a solution from Azure Marketplace.</li>"
-    $html += "<li><strong>Timeline:</strong> no new OS/regions after 2025-06-30; portal onboarding blocked after 2025-09-30; full retirement 2028-06-30.</li>"
+    $html += "<li><strong>Timeline source:</strong> retirement dates shown here come from the live Azure Advisor recommendation for each affected resource.</li>"
     $html += "<li><strong>Agent presence is verified deterministically</strong> via the <code>Microsoft.Azure.Monitoring.DependencyAgent</code> extension publisher (ARG), because the Advisor recommendation can fire on VMs without the agent installed (residual DCR/Policy &lsquo;Processes and dependencies (Map)&rsquo;).</li>"
     $html += "</ul>"
     $html += "<p style='font-size:13px'><strong>Agent presence:</strong> <span style='color:#dc2626;font-weight:600'>$confirmed Confirmed</span> (real offboarding action) &middot; <span style='color:#666;font-weight:600'>$unconfirmed Unconfirmed</span> (likely DCR/Policy residue - no action) &middot; <span style='color:#b45309;font-weight:600'>$unknown Unknown</span> (detection unavailable - verify manually)</p>"
@@ -5062,12 +5349,12 @@ function ConvertTo-MonitoringLifecycleTrackHtml {
         $state = if ($row.AgentPresence) { [string]$row.AgentPresence } else { "Unknown" }
         $vmDisplay = if ($row.ResourceId) { ([string]$row.ResourceId -split '/')[-1] } else { "N/A" }
         $action = switch ($state) {
-            'Confirmed'   { "Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required (AMA covers inventory only)." }
+            'Confirmed'   { "Plan offboarding before the Advisor retirement date; select a Marketplace mapping solution if process/dependency data is required (AMA covers inventory only)." }
             'Unconfirmed' { "No action: agent not detected on this VM. Likely a residual DCR/Policy assignment - review and remove the &lsquo;Processes and dependencies (Map)&rsquo; data collection if unused." }
             default       { "Verify manually whether the Dependency Agent is installed (detection query unavailable)." }
         }
         $stateColor = switch ($state) { 'Confirmed' { '#dc2626' } 'Unconfirmed' { '#666' } default { '#b45309' } }
-        $retireDate = if ($row.RetireOn) { [string]$row.RetireOn } else { "2028-06-30" }
+        $retireDate = if ($row.RetireOn) { [string]$row.RetireOn } else { 'N/A' }
         $html += "<tr style='border-bottom:1px solid #ddd'>"
         $html += "<td style='padding:8px;border:1px solid #ccc;font-weight:600'>$vmDisplay</td>"
         $html += "<td style='padding:8px;border:1px solid #ccc'>Dependency Agent / VM Insights Map</td>"
@@ -5089,7 +5376,7 @@ function Get-RetirementSourceHealth {
     
     .DESCRIPTION
     Live-only verdict:
-      - OK    : All retirement rows backed by live sources (LiveAdvisorArg / LiveLearnMarkdown).
+    - OK    : All retirement rows backed by live sources (Advisor / Learn / Release Communications).
       - WARN  : At least one live source available, but not all rows are live-backed.
       - BLOCK : No live sources available; report cannot be published without live evidence.
     #>
@@ -5108,14 +5395,14 @@ function Get-RetirementSourceHealth {
         param($r)
         $gate = if ($r.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$r.RetirementSourceGate } else { '' }
         $es = if ($r.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$r.EvidenceSource } else { '' }
-        if ($gate -eq 'LiveLearnMarkdown' -or $es -eq 'LiveLearnMarkdown' -or $es -eq 'LiveLearnMarkdown + AdvisorSignal') { return $true }
+        if ($gate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $es -in @('LiveLearnMarkdown', 'LiveLearnMarkdown + AdvisorSignal', 'ReleaseCommunicationsApi', 'ReleaseCommunicationsApi + AdvisorSignal')) { return $true }
         if ($gate -eq 'LiveAdvisorArg' -or $es -eq 'AdvisorSignalOnly') { return $true }
         return $false
     }
     $findingRows = @($rowsArr | Where-Object { & $isRetirementFinding $_ })
     $liveRows = @($findingRows | Where-Object {
         $_.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0 -and
-        ($_.RetirementSourceGate -eq 'LiveAdvisorArg' -or $_.RetirementSourceGate -eq 'LiveLearnMarkdown')
+        ($_.RetirementSourceGate -in @('LiveAdvisorArg', 'LiveLearnMarkdown', 'ReleaseCommunicationsApi'))
     }).Count
 
     $totalRows = $findingRows.Count
@@ -5128,7 +5415,7 @@ function Get-RetirementSourceHealth {
     }
     elseif ($liveRows -eq $totalRows) {
         $status = "OK"
-        $message = "All $($liveRows) retirement finding(s) backed by live sources (Azure Advisor ARG / Microsoft Learn)."
+        $message = "All $($liveRows) retirement finding(s) backed by live sources (Azure Advisor ARG / Microsoft Learn / Microsoft Release Communications)."
         $color = "#16a34a"; $bg = "#dcfce7"
     }
     elseif ($liveRows -gt 0) {
@@ -5167,7 +5454,7 @@ function Build-ReportFacts {
         $evidenceSource = if ($row.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$row.EvidenceSource } else { '' }
         $sourceGate = if ($row.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$row.RetirementSourceGate } else { '' }
         $retirementClass = 'None'
-        if ($sourceGate -eq 'LiveLearnMarkdown' -or $evidenceSource -eq 'LiveLearnMarkdown' -or $evidenceSource -eq 'LiveLearnMarkdown + AdvisorSignal') {
+        if ($sourceGate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $evidenceSource -in @('LiveLearnMarkdown', 'LiveLearnMarkdown + AdvisorSignal', 'ReleaseCommunicationsApi', 'ReleaseCommunicationsApi + AdvisorSignal')) {
             $retirementClass = 'SkuFamily'
         }
         elseif ($sourceGate -eq 'LiveAdvisorArg' -or $evidenceSource -eq 'AdvisorSignalOnly') {
@@ -5580,7 +5867,7 @@ function Assert-DeliveryReady {
         # Fall back to inspecting the rows directly when no health object was provided.
         $liveRows = @($Rows | Where-Object {
                 $_.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0 -and
-                ($_.RetirementSourceGate -eq 'LiveAdvisorArg' -or $_.RetirementSourceGate -eq 'LiveLearnMarkdown')
+                ($_.RetirementSourceGate -in @('LiveAdvisorArg', 'LiveLearnMarkdown', 'ReleaseCommunicationsApi'))
             }).Count
         if ($retireCount -gt 0 -and $liveRows -ge $retireCount) {
             & $record '3. Post-run' 'Provenance: live retirement source' 'PASS' "$liveRows retirement row(s) backed by a live source gate."
@@ -5596,7 +5883,7 @@ function Assert-DeliveryReady {
     # As-of provenance: retirement rows should carry an as-of date; AI provenance carries model+timestamp.
     $retireGateRows = @($Rows | Where-Object {
             $_.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0 -and
-            ($_.RetirementSourceGate -eq 'LiveAdvisorArg' -or $_.RetirementSourceGate -eq 'LiveLearnMarkdown')
+            ($_.RetirementSourceGate -in @('LiveAdvisorArg', 'LiveLearnMarkdown', 'ReleaseCommunicationsApi'))
         })
     $rowsMissingAsOf = @($retireGateRows | Where-Object {
             $_.PSObject.Properties.Match('RetirementSourceAsOf').Count -eq 0 -or
@@ -5943,7 +6230,7 @@ function Build-RemediationPlan {
         param($r)
         $gate = if ($r.PSObject.Properties.Match('RetirementSourceGate').Count -gt 0) { [string]$r.RetirementSourceGate } else { '' }
         $es = if ($r.PSObject.Properties.Match('EvidenceSource').Count -gt 0) { [string]$r.EvidenceSource } else { '' }
-        if ($gate -eq 'LiveLearnMarkdown' -or $es -eq 'LiveLearnMarkdown' -or $es -eq 'LiveLearnMarkdown + AdvisorSignal') { return $true }
+        if ($gate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi') -or $es -in @('LiveLearnMarkdown', 'LiveLearnMarkdown + AdvisorSignal', 'ReleaseCommunicationsApi', 'ReleaseCommunicationsApi + AdvisorSignal')) { return $true }
         if ($gate -eq 'LiveAdvisorArg' -or $es -eq 'AdvisorSignalOnly') { return $true }
         return $false
     }
@@ -6092,16 +6379,17 @@ function ConvertTo-ReleaseCommunicationHtml {
 
     $status = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Status').Count -gt 0) { [string]$ReleaseCommunicationContext.Status } else { 'Unknown' }
     $checkedAt = if ($ReleaseCommunicationContext.PSObject.Properties.Match('CheckedAtUtc').Count -gt 0) { [string]$ReleaseCommunicationContext.CheckedAtUtc } else { 'N/A' }
-    $lookback = if ($ReleaseCommunicationContext.PSObject.Properties.Match('LookbackMonths').Count -gt 0) { [int]$ReleaseCommunicationContext.LookbackMonths } else { 12 }
+    $lookback = if ($ReleaseCommunicationContext.PSObject.Properties.Match('LookbackMonths').Count -gt 0) { [int]$ReleaseCommunicationContext.LookbackMonths } else { 0 }
+    $historyScope = if ($lookback -gt 0) { "over the last $lookback month(s)" } else { 'across all available history' }
     $url = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Url').Count -gt 0) { [string]$ReleaseCommunicationContext.Url } else { '' }
     $rows = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Rows').Count -gt 0) { @($ReleaseCommunicationContext.Rows) } else { @() }
 
     $builder = New-Object 'System.Text.StringBuilder'
-    [void]$builder.Append("<section class='panel release-panel'><h2>Official Microsoft Communications <span class='tag tag-preview'>Context only</span></h2>")
-    [void]$builder.Append("<p class='meta'>Microsoft Release Communications RSS checked at $(ConvertTo-ReleaseHtmlText $checkedAt) over the last $(ConvertTo-ReleaseHtmlText $lookback) month(s). This section is read-only context: it never changes retirement counts, waves, backlog, CSV rows or executive KPIs.</p>")
+    [void]$builder.Append("<section class='panel release-panel'><h2>Official Microsoft Communications <span class='tag tag-preview'>Official source</span></h2>")
+    [void]$builder.Append("<p class='meta'>Microsoft Release Communications API checked at $(ConvertTo-ReleaseHtmlText $checkedAt) $(ConvertTo-ReleaseHtmlText $historyScope). Deterministic SKU-family matches with structured retirement availability are used as authoritative findings; unmatched notices remain coverage context.</p>")
     if ($status -ne 'OK') {
         $errorText = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Error').Count -gt 0) { [string]$ReleaseCommunicationContext.Error } else { 'N/A' }
-        [void]$builder.Append("<p class='meta'>RSS status: <strong>$(ConvertTo-ReleaseHtmlText $status)</strong>. Report numbers are unchanged. $(ConvertTo-ReleaseHtmlText $errorText)</p>")
+        [void]$builder.Append("<p class='meta'>API status: <strong>$(ConvertTo-ReleaseHtmlText $status)</strong>. Report numbers are unchanged. $(ConvertTo-ReleaseHtmlText $errorText)</p>")
         [void]$builder.Append('</section>')
         return $builder.ToString()
     }
@@ -6109,7 +6397,7 @@ function ConvertTo-ReleaseCommunicationHtml {
     [void]$builder.Append("<div class='kpis preview-kpis'><div class='kpi'><div class='kpi-label'>Relevant notices</div><div class='kpi-value'>$(ConvertTo-ReleaseHtmlText $ReleaseCommunicationContext.RelevantCount)</div></div><div class='kpi'><div class='kpi-label'>Corroborated</div><div class='kpi-value'>$(ConvertTo-ReleaseHtmlText $ReleaseCommunicationContext.CorroboratedCount)</div></div><div class='kpi'><div class='kpi-label'>FinOps</div><div class='kpi-value'>$(ConvertTo-ReleaseHtmlText $ReleaseCommunicationContext.FinOpsCount)</div></div><div class='kpi'><div class='kpi-label'>Review-only</div><div class='kpi-value'>$(ConvertTo-ReleaseHtmlText $ReleaseCommunicationContext.ReviewOnlyCount)</div></div></div>")
 
     if ($rows.Count -eq 0) {
-        [void]$builder.Append("<p class='meta'>No relevant VM, VMSS, Batch, retirement or FinOps notices were selected from the feed in this lookback window. Source: <a href='$(ConvertTo-ReleaseHtmlText $url)'>Release Communications RSS</a>.</p>")
+        [void]$builder.Append("<p class='meta'>No VM, VMSS, Batch or retirement notices were returned by the configured API query. Source: <a href='$(ConvertTo-ReleaseHtmlText $url)'>Release Communications API</a>.</p>")
         [void]$builder.Append('</section>')
         return $builder.ToString()
     }
@@ -6194,7 +6482,7 @@ function ConvertTo-SimplifiedReportHtml {
 
     $riCutoffRows = @()
     $riCutoffScanned = 0
-    $riCutoffDate = '2026-07-01'
+    $riCutoffDate = 'N/A'
     if ($ReservedInstanceCutoffPreview) {
         if ($ReservedInstanceCutoffPreview.PSObject.Properties.Match('Rows').Count -gt 0) { $riCutoffRows = @($ReservedInstanceCutoffPreview.Rows) }
         if ($ReservedInstanceCutoffPreview.PSObject.Properties.Match('TotalResourcesScanned').Count -gt 0) { $riCutoffScanned = [int]$ReservedInstanceCutoffPreview.TotalResourcesScanned }
@@ -6207,15 +6495,15 @@ function ConvertTo-SimplifiedReportHtml {
     $releaseCommunicationHtml = ConvertTo-ReleaseCommunicationHtml -ReleaseCommunicationContext $ReleaseCommunicationContext
     $releaseCommunicationStatusText = 'not checked'
     if ($ReleaseCommunicationContext) {
-        $rssStatus = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Status').Count -gt 0) { [string]$ReleaseCommunicationContext.Status } else { 'Unknown' }
-        $rssChecked = if ($ReleaseCommunicationContext.PSObject.Properties.Match('CheckedAtUtc').Count -gt 0) { [string]$ReleaseCommunicationContext.CheckedAtUtc } else { 'N/A' }
-        $rssRelevant = if ($ReleaseCommunicationContext.PSObject.Properties.Match('RelevantCount').Count -gt 0) { [int]$ReleaseCommunicationContext.RelevantCount } else { 0 }
-        $rssReviewOnly = if ($ReleaseCommunicationContext.PSObject.Properties.Match('ReviewOnlyCount').Count -gt 0) { [int]$ReleaseCommunicationContext.ReviewOnlyCount } else { 0 }
-        if ($rssStatus -eq 'OK') {
-            $releaseCommunicationStatusText = "checked $rssChecked | $rssRelevant relevant | $rssReviewOnly review-only"
+        $communicationStatus = if ($ReleaseCommunicationContext.PSObject.Properties.Match('Status').Count -gt 0) { [string]$ReleaseCommunicationContext.Status } else { 'Unknown' }
+        $communicationChecked = if ($ReleaseCommunicationContext.PSObject.Properties.Match('CheckedAtUtc').Count -gt 0) { [string]$ReleaseCommunicationContext.CheckedAtUtc } else { 'N/A' }
+        $communicationRelevant = if ($ReleaseCommunicationContext.PSObject.Properties.Match('RelevantCount').Count -gt 0) { [int]$ReleaseCommunicationContext.RelevantCount } else { 0 }
+        $communicationReviewOnly = if ($ReleaseCommunicationContext.PSObject.Properties.Match('ReviewOnlyCount').Count -gt 0) { [int]$ReleaseCommunicationContext.ReviewOnlyCount } else { 0 }
+        if ($communicationStatus -eq 'OK') {
+            $releaseCommunicationStatusText = "checked $communicationChecked | $communicationRelevant relevant | $communicationReviewOnly review-only"
         }
         else {
-            $releaseCommunicationStatusText = "$rssStatus | report numbers unchanged"
+            $releaseCommunicationStatusText = "$communicationStatus | report numbers unchanged"
         }
     }
 
@@ -6393,10 +6681,10 @@ function ConvertTo-SimplifiedReportHtml {
             $state = if ($monitoringRow.PSObject.Properties.Match('AgentPresence').Count -gt 0 -and $monitoringRow.AgentPresence) { [string]$monitoringRow.AgentPresence } else { 'Unknown' }
             $resourceId = if ($monitoringRow.PSObject.Properties.Match('ResourceId').Count -gt 0) { [string]$monitoringRow.ResourceId } else { '' }
             $vmDisplay = if ($resourceId) { ($resourceId -split '/')[-1] } else { 'N/A' }
-            $retireDate = if ($monitoringRow.PSObject.Properties.Match('RetireOn').Count -gt 0 -and $monitoringRow.RetireOn) { [string]$monitoringRow.RetireOn } else { '2028-06-30' }
+            $retireDate = if ($monitoringRow.PSObject.Properties.Match('RetireOn').Count -gt 0 -and $monitoringRow.RetireOn) { [string]$monitoringRow.RetireOn } else { 'N/A' }
             $stateClass = switch ($state) { 'Confirmed' { 'tag-gen' } 'Unconfirmed' { 'tag-os' } default { 'tag-advisor' } }
             $action = switch ($state) {
-                'Confirmed'   { 'Plan offboarding before 2028-06-30; select a Marketplace mapping solution if process/dependency data is required.' }
+                'Confirmed'   { 'Plan offboarding before the Advisor retirement date; select a Marketplace mapping solution if process/dependency data is required.' }
                 'Unconfirmed' { 'No action: Dependency Agent not detected; review residual DCR/Policy assignment if unused.' }
                 default       { 'Verify manually whether the Dependency Agent is installed.' }
             }
@@ -6679,6 +6967,7 @@ ul { margin-top: 8px; }
 .decision-value { font-size: 28px; font-weight: 900; margin-top: 5px; color: #0f172a; }
 .decision-title { font-size: 14px; font-weight: 800; color: #1e293b; margin-top: 4px; }
 .decision-note { font-size: 12px; color: #334155; margin-top: 6px; }
+.decision-equation { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid #60a5fa; background: rgba(255,255,255,.72); color: #334155; font-size: 12px; line-height: 1.45; }
 .matrix-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
 .matrix-cell { border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; padding: 12px; }
 .matrix-axis { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; color: #64748b; }
@@ -6803,10 +7092,20 @@ ul { margin-top: 8px; }
 <section class="legend-box">
 <h3>Decision sections</h3>
 <dl>
-<div><dt>Decision Room</dt><dd>Management view: what to act on now, what needs validation, and what can move as quick wins.</dd></div>
+<div><dt>Decision Room</dt><dd>Management view: what to act on now, what needs validation, and what can move as quick wins. The 90-day label is a planning frame, not a Microsoft retirement deadline or a promise that every migration completes in 90 days.</dd></div>
 <div><dt>Risk vs Effort Matrix</dt><dd>Translates waves into execution lanes so risk and engineering effort are visible at a glance.</dd></div>
 <div><dt>Execution Scenarios</dt><dd>Conservative, balanced and accelerated views over the same facts. They do not change counts or recommendations.</dd></div>
 <div><dt>If We Do Nothing</dt><dd>Earliest dated retirement rows, useful as the escalation queue for planning.</dd></div>
+</dl>
+</section>
+<section class="legend-box">
+<h3>How Decision Room numbers reconcile</h3>
+<dl>
+<div><dt>Retirement path fraction</dt><dd>The numerator is impacted Compute resources; the denominator is all scanned standalone VMs, VMSS and Batch pools. Monitoring rows are excluded from both.</dd></div>
+<div><dt>Standalone VM lanes</dt><dd>This sprint (W0) + Next wave (W1-W3) + Quick wins (W4) equals the standalone VM retirement-path count. Every standalone VM belongs to exactly one wave.</dd></div>
+<div><dt>Compute total</dt><dd>Standalone retirement-path VMs + impacted VMSS + impacted Batch pools. Preview sidecars are included here but stay outside standalone VM waves.</dd></div>
+<div><dt>RI cutoff and monitoring</dt><dd>Independent, potentially overlapping populations. They are not added to the Compute total: RI cutoff is a commercial planning signal, while monitoring is a separate feature lifecycle.</dd></div>
+<div><dt>Advisor-confirmed share</dt><dd>Advisor-confirmed standalone retirement-path VMs divided by all standalone retirement-path VMs. A low value does not invalidate official Learn or Release Communications family evidence.</dd></div>
 </dl>
 </section>
 <section class="legend-box">
@@ -6838,7 +7137,7 @@ ul { margin-top: 8px; }
 </nav>
 <div class="side-item"><span>Generated (UTC)</span><strong>$(ConvertTo-HtmlText $generatedUtc)</strong></div>
 <div class="side-item"><span>Live sources</span><strong>$(ConvertTo-HtmlText $liveSources)</strong></div>
-<div class="side-item"><span>Release Communications RSS</span><strong>$(ConvertTo-HtmlText $releaseCommunicationStatusText)</strong></div>
+<div class="side-item"><span>Release Communications API</span><strong>$(ConvertTo-HtmlText $releaseCommunicationStatusText)</strong></div>
 <div class="side-item"><span>Tenants / subscriptions</span><strong>$(ConvertTo-HtmlText $tenantCount) / $(ConvertTo-HtmlText $subscriptionCount)</strong></div>
 <div class="side-item"><span>As-of</span><strong>$(ConvertTo-HtmlText $asOfText)</strong></div>
 <label class="help-tab" for="report-help-toggle" title="Open report guide" aria-label="Open report guide">Legend</label>
@@ -6876,32 +7175,33 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 </section>
 
 <section class="story-band">
-<div class="story-kicker">Decision Room<span class="info-dot" title="Management view that groups deterministic waves into immediate action, validation and quick-win lanes.">i</span></div>
-<div class="story-title">90-day modernization playbook</div>
-<p class="story-subtitle">Use the deterministic wave output to drive sequencing decisions: what to execute now, what to validate, and what can move as quick wins.</p>
-<span class="story-status">$(ConvertTo-HtmlText $statusLine)</span>
+<div class="story-kicker">Decision Room<span class="info-dot" title="Management view that groups deterministic standalone-VM waves into immediate action, validation and quick-win lanes; VMSS and Batch remain separate sidecars.">i</span></div>
+<div class="story-title">90-day modernization playbook<span class="info-dot" title="Planning horizon only. It is not a Microsoft retirement deadline and does not imply that every migration can complete in 90 days.">i</span></div>
+<p class="story-subtitle">Use the deterministic wave output to sequence work. The first three cards partition standalone VMs; add Preview sidecars only when reading the total Compute exposure.</p>
+<span class="story-status" title="Impacted Compute resources divided by all scanned standalone VMs, VMSS and Batch pools. Monitoring is excluded.">$(ConvertTo-HtmlText $statusLine)</span>
+<p class="decision-equation"><strong>Reconcile the counts:</strong> W0 $(ConvertTo-HtmlText $actNowCount) + W1-W3 $(ConvertTo-HtmlText $planNowCount) + W4 $(ConvertTo-HtmlText $quickWinCount) = $(ConvertTo-HtmlText $Facts.RetireCount) standalone VM(s). Then add $(ConvertTo-HtmlText $sidecarRetirementCount) impacted VMSS/Batch sidecar(s) = $(ConvertTo-HtmlText $computeRetirementCount) Compute resource(s). RI cutoff and monitoring are separate, potentially overlapping signals and are not added.</p>
 
 <div class="decision-grid">
 <article class="decision-card">
-<div class="decision-tag">This sprint</div>
+<div class="decision-tag">This sprint<span class="info-dot" title="Count of standalone retirement-path VMs assigned to W0 because retirement risk is Critical.">i</span></div>
 <div class="decision-value">$(ConvertTo-HtmlText $actNowCount)</div>
 <div class="decision-title">Act now (W0)</div>
 <div class="decision-note">Critical retirement deadlines that should be prioritized in the current sprint.</div>
 </article>
 <article class="decision-card">
-<div class="decision-tag">Next wave</div>
+<div class="decision-tag">Next wave<span class="info-dot" title="Count of standalone retirement-path VMs assigned to W1, W2 or W3. This combines urgency, sensitivity and architecture-validation lanes.">i</span></div>
 <div class="decision-value">$(ConvertTo-HtmlText $planNowCount)</div>
 <div class="decision-title">Plan with validation (W1 + W2 + W3)</div>
 <div class="decision-note">High urgency or higher-effort workloads that need planning and validation before cutover; Advisor/sensitive facts are shown per workload.</div>
 </article>
 <article class="decision-card">
-<div class="decision-tag">Quick wins</div>
+<div class="decision-tag">Quick wins<span class="info-dot" title="Count of standalone retirement-path VMs assigned to W4. Low complexity still requires compatibility, quota, capacity and change validation.">i</span></div>
 <div class="decision-value">$(ConvertTo-HtmlText $quickWinCount)</div>
 <div class="decision-title">Low-complexity moves (W4)</div>
 <div class="decision-note">Candidate moves for accelerated execution batches, often suitable for standard runbooks.</div>
 </article>
 <article class="decision-card">
-<div class="decision-tag">Preview sidecars</div>
+<div class="decision-tag">Preview sidecars<span class="info-dot" title="Impacted VM Scale Sets plus Batch pools. Included in Compute total, excluded from standalone VM waves and backlog.">i</span></div>
 <div class="decision-value">$(ConvertTo-HtmlText $sidecarRetirementCount)</div>
 <div class="decision-title">VMSS + Batch</div>
 <div class="decision-note">Separate detail tables below; keep them visible in planning but outside standalone VM wave counts.</div>
@@ -6909,11 +7209,11 @@ $(if (-not [string]::IsNullOrWhiteSpace($ExecutiveNarrativeText)) { "<p class='e
 </div>
 
 <div class="confidence-line">
-<span class="confidence-chip">Advisor-confirmed share: $(ConvertTo-HtmlText $advisorConfidencePercent)% of retirement-path VMs</span>
-<span class="confidence-chip">Live source status: $(ConvertTo-HtmlText $liveCoverage)</span>
-<span class="confidence-chip">Compute total: $(ConvertTo-HtmlText $computeRetirementCount) = VM $(ConvertTo-HtmlText $Facts.RetireCount) + VMSS $(ConvertTo-HtmlText $vmssPreviewRows.Count) + Batch $(ConvertTo-HtmlText $batchPreviewRows.Count)</span>
-<span class="confidence-chip">RI cutoff planning: $(ConvertTo-HtmlText $riCutoffRows.Count) resource(s); actual reservations not queried</span>
-<span class="confidence-chip">Monitoring kept separate: $(ConvertTo-HtmlText $Facts.MonitoringDistinctVmCount) VM(s)</span>
+<span class="confidence-chip" title="Denominator: standalone VMs on the retirement path. Numerator: those with a per-resource Azure Advisor retirement signal.">Advisor-confirmed share: $(ConvertTo-HtmlText $advisorConfidencePercent)% of retirement-path VMs</span>
+<span class="confidence-chip" title="All standalone retirement findings reconcile to accepted live source gates. This does not mean every finding is Advisor-confirmed.">Live source status: $(ConvertTo-HtmlText $liveCoverage)</span>
+<span class="confidence-chip" title="Impacted Compute resources only. Monitoring lifecycle and RI cutoff planning are excluded.">Compute total: $(ConvertTo-HtmlText $computeRetirementCount) = VM $(ConvertTo-HtmlText $Facts.RetireCount) + VMSS $(ConvertTo-HtmlText $vmssPreviewRows.Count) + Batch $(ConvertTo-HtmlText $batchPreviewRows.Count)</span>
+<span class="confidence-chip" title="Independent commercial-planning population derived from the official RI cutoff notice. Resources may overlap the Compute retirement path; actual tenant reservations are not queried.">RI cutoff planning: $(ConvertTo-HtmlText $riCutoffRows.Count) resource(s); actual reservations not queried</span>
+<span class="confidence-chip" title="Separate Azure Monitor feature-lifecycle population. The same VM may also appear on the Compute retirement path, so this count is not additive.">Monitoring kept separate: $(ConvertTo-HtmlText $Facts.MonitoringDistinctVmCount) VM(s)</span>
 </div>
 </section>
 </div>
@@ -7268,7 +7568,7 @@ function ConvertTo-ReportHtml {
         GeneratedUtc          = [string]$facts.GeneratedAtUtc
         TenantCount           = $tenantIds.Count
         SubscriptionCount     = $subscriptionIds.Count
-        LiveSources           = if ($ReleaseCommunicationContext) { 'Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook), Microsoft Release Communications RSS (context-only)' } else { 'Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook)' }
+        LiveSources           = if ($ReleaseCommunicationContext) { 'Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook), Microsoft Release Communications API' } else { 'Azure Advisor (ARG), Microsoft Learn (Service Retirement Workbook)' }
         LiveSourcesOk         = ($retirementSourceHealth.Status -eq 'OK')
         AsOf                  = $asOf
         NearestRetirementDate = $nearestRetirementDate
@@ -7573,7 +7873,21 @@ try {
 
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Loading retirement data"
-    $retirements = Get-Retirements -UseOfficialList $UseOfficialRetirementList -UsePortalSource $UsePortalRetirementSource -Subscriptions $effectiveSubscriptionIds -AdvisorRetirementTypeIdBlocklist $AdvisorRetirementTypeIdBlocklist -AdvisorRetirementNameBlockPattern $AdvisorRetirementNameBlockPattern -RequireLiveRetirementSource $RequireLiveRetirementSource
+    Write-Log "Load-Retirements: Attempting STREAM C (Microsoft Release Communications API)..." "INFO"
+    $releaseCommunicationsApiResult = if ($UseReleaseCommunicationsApi) {
+        Get-ReleaseCommunicationsApiItems -Url $ReleaseCommunicationsApiUrl -LookbackMonths $ReleaseCommunicationsLookbackMonths -CacheDir $effectiveCacheRoot -UseCache $UsePersistentCache -CacheTtlHours $ReleaseCommunicationsCacheTtlHours -ForceRefresh ([bool]$ForceRefreshCache)
+    }
+    else {
+        [pscustomobject]@{ Ok = $false; Status = 'Disabled'; Url = $ReleaseCommunicationsApiUrl; CheckedAtUtc = (Get-Date).ToUniversalTime().ToString('o'); LookbackMonths = $ReleaseCommunicationsLookbackMonths; Items = @(); Error = 'Disabled by parameter' }
+    }
+    if ($releaseCommunicationsApiResult.Ok) {
+        Write-Log "Load-Retirements: STREAM C API succeeded. Notices=$(@($releaseCommunicationsApiResult.Items).Count); cache mode=$($releaseCommunicationsApiResult.CacheMode); index records=$($releaseCommunicationsApiResult.CachedTotal); detail updates=$($releaseCommunicationsApiResult.DetailUpdates); pages=$($releaseCommunicationsApiResult.PageCount)." "INFO"
+    }
+    else {
+        Write-Log "Load-Retirements: STREAM C API status=$($releaseCommunicationsApiResult.Status). $($releaseCommunicationsApiResult.Error)" "WARN"
+    }
+    $inventorySkuNames = @($inventory | ForEach-Object { if ($_.PSObject.Properties.Match('VmSize').Count -gt 0) { [string]$_.VmSize } elseif ($_.PSObject.Properties.Match('CurrentSku').Count -gt 0) { [string]$_.CurrentSku } } | Where-Object { $_ } | Sort-Object -Unique)
+    $retirements = Get-Retirements -UseOfficialList $UseOfficialRetirementList -UsePortalSource $UsePortalRetirementSource -Subscriptions $effectiveSubscriptionIds -AdvisorRetirementTypeIdBlocklist $AdvisorRetirementTypeIdBlocklist -AdvisorRetirementNameBlockPattern $AdvisorRetirementNameBlockPattern -RequireLiveRetirementSource $RequireLiveRetirementSource -ReleaseCommunicationItems @($releaseCommunicationsApiResult.Items) -InventorySkuNames $inventorySkuNames -ReleaseCommunicationsOk ([bool]$releaseCommunicationsApiResult.Ok)
     $batchPoolPreview = Build-BatchPoolRetirementPreview -BatchPools $batchPoolInventory -Retirements $retirements
     Write-Log "Batch pool public preview: scanned $($batchPoolPreview.TotalBatchPoolsScanned) pool(s), retirement path $($batchPoolPreview.RetirementPathCount)."
     $vmssPreview = Build-VmssRetirementPreview -VmScaleSets $vmssInventory -Retirements $retirements
@@ -7603,14 +7917,14 @@ try {
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Generating report output"
 
     $results = @($results | Sort-Object VmName)
-    $reservedInstanceCutoffPreview = Build-ReservedInstanceCutoffPreview -VmRows $results -BatchPools $batchPoolInventory -VmScaleSets $vmssInventory -Retirements $retirements
+    $reservedInstanceCutoffPreview = Build-ReservedInstanceCutoffPreview -VmRows $results -BatchPools $batchPoolInventory -VmScaleSets $vmssInventory -Retirements $retirements -ReleaseCommunicationItems @($releaseCommunicationsApiResult.Items)
     Write-Log "Reserved Instance cutoff public preview: scanned $($reservedInstanceCutoffPreview.TotalResourcesScanned) compute resource(s), exposure $($reservedInstanceCutoffPreview.ImpactCount)."
 
-    $preRssCountSnapshot = Get-ReportCountSnapshot -Rows $results -MonitoringLifecycle $monitoringLifecycle
-    $releaseCommunicationContext = Get-ReleaseCommunicationsPreview -Enabled $UseReleaseCommunicationRss -Url $ReleaseCommunicationRssUrl -LookbackMonths $RssLookbackMonths -Rows $results -BatchPoolPreview $batchPoolPreview -VmssPreview $vmssPreview -ReservedInstanceCutoffPreview $reservedInstanceCutoffPreview
-    $postRssCountSnapshot = Get-ReportCountSnapshot -Rows $results -MonitoringLifecycle $monitoringLifecycle
-    Assert-CountsUnchangedAfterRss -Before $preRssCountSnapshot -After $postRssCountSnapshot
-    Write-Log "Release Communications RSS context: status=$($releaseCommunicationContext.Status), relevant=$($releaseCommunicationContext.RelevantCount), corroborated=$($releaseCommunicationContext.CorroboratedCount), FinOps=$($releaseCommunicationContext.FinOpsCount), review-only=$($releaseCommunicationContext.ReviewOnlyCount). Counts unchanged."
+    $preReleaseCommunicationsCountSnapshot = Get-ReportCountSnapshot -Rows $results -MonitoringLifecycle $monitoringLifecycle
+    $releaseCommunicationContext = Get-ReleaseCommunicationsPreview -Enabled $UseReleaseCommunicationsApi -Url $ReleaseCommunicationsApiUrl -LookbackMonths $ReleaseCommunicationsLookbackMonths -CacheDir $effectiveCacheRoot -UseCache $UsePersistentCache -CacheTtlHours $ReleaseCommunicationsCacheTtlHours -ForceRefresh ([bool]$ForceRefreshCache) -ApiResult $releaseCommunicationsApiResult -Rows $results -BatchPoolPreview $batchPoolPreview -VmssPreview $vmssPreview -ReservedInstanceCutoffPreview $reservedInstanceCutoffPreview
+    $postReleaseCommunicationsCountSnapshot = Get-ReportCountSnapshot -Rows $results -MonitoringLifecycle $monitoringLifecycle
+    Assert-CountsUnchangedAfterReleaseCommunicationCoverage -Before $preReleaseCommunicationsCountSnapshot -After $postReleaseCommunicationsCountSnapshot
+    Write-Log "Release Communications API coverage: status=$($releaseCommunicationContext.Status), relevant=$($releaseCommunicationContext.RelevantCount), corroborated=$($releaseCommunicationContext.CorroboratedCount), FinOps=$($releaseCommunicationContext.FinOpsCount), review-only=$($releaseCommunicationContext.ReviewOnlyCount). Coverage rendering left computed findings unchanged."
 
     $csvPath = Join-Path $runDir "sku_modernization_report.csv"
     $jsonPath = Join-Path $runDir "sku_modernization_report.json"

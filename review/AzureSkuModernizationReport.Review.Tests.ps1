@@ -24,6 +24,7 @@ BeforeAll {
     $script:RiskCriticalDays = 365
     $script:RiskHighDays = 730
     $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
+    $script:EffectiveTenantId = 'test-tenant'
 
     function Write-Log {
         param($Message, $Level)
@@ -130,6 +131,386 @@ BeforeAll {
     }
 }
 
+Describe 'Microsoft Release Communications API ingestion' {
+    It 'derives commercial series <Family> from SKU <Sku> without an affected-family lookup list' -ForEach @(
+        @{ Sku = 'Standard_DS2_v3'; Family = 'Dsv3-series' }
+        @{ Sku = 'Standard_D2_v3'; Family = 'Dv3-series' }
+        @{ Sku = 'Standard_ES2_v3'; Family = 'Esv3-series' }
+        @{ Sku = 'Standard_E2_v3'; Family = 'Ev3-series' }
+        @{ Sku = 'Standard_DS2_v2'; Family = 'Dsv2-series' }
+        @{ Sku = 'Standard_D2_v2'; Family = 'Dv2-series' }
+        @{ Sku = 'Standard_L8s_v2'; Family = 'Lsv2-series' }
+        @{ Sku = 'Standard_A1_v2'; Family = 'Av2-series' }
+        @{ Sku = 'Standard_A2m_v2'; Family = 'Amv2-series' }
+        @{ Sku = 'Standard_B4ms'; Family = 'Bv1-series' }
+        @{ Sku = 'Standard_F2_v2'; Family = 'Fsv2-series' }
+        @{ Sku = 'Standard_GS5'; Family = 'Gs-series' }
+    ) {
+        Convert-SkuToReservedInstanceCutoffFamily -SkuName $Sku | Should -Be $Family
+    }
+
+    It 'uses the official commercial notice for RI cutoff without creating a VM retirement' {
+        $notice = [pscustomobject]@{
+            Title          = 'Retirement: Azure Reserved Virtual Machines Instances for select VM series'
+            Description    = 'Starting July 1, 2026, purchases and renewals will no longer be available for Reserved VM Instances for the Dv2, Dsv2, and Dv3 VM series.'
+            Link           = 'https://azure.microsoft.com/updates?id=560948'
+            Tags           = @('Retirements', 'Pricing & Offerings')
+            Categories     = @('Virtual Machines')
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2026; month = 'July' })
+        }
+        $rows = @(
+            [pscustomobject]@{ VmName = 'affected'; CurrentSku = 'Standard_D2_v2'; Region = 'eastus'; RetirementDate = 'N/A' }
+            [pscustomobject]@{ VmName = 'unaffected'; CurrentSku = 'Standard_F2'; Region = 'eastus'; RetirementDate = 'N/A' }
+        )
+
+        $preview = Build-ReservedInstanceCutoffPreview -VmRows $rows -ReleaseCommunicationItems @($notice)
+        $technicalSeries = @(Get-ReleaseCommunicationRetirementSeries -Items @($notice) -SkuNames @('Standard_D2_v2'))
+
+        $preview.CutoffDate | Should -Be '2026-07-01'
+        $preview.ImpactCount | Should -Be 1
+        $preview.Rows[0].Family | Should -Be 'Dv2-series'
+        $preview.Rows[0].Source | Should -Be $notice.Link
+        $technicalSeries.Count | Should -Be 0
+    }
+
+    It 'does not fabricate RI cutoff exposure when the official notice is unavailable' {
+        $row = [pscustomobject]@{ VmName = 'vm'; CurrentSku = 'Standard_D2_v2'; Region = 'eastus'; RetirementDate = 'N/A' }
+
+        $preview = Build-ReservedInstanceCutoffPreview -VmRows @($row) -ReleaseCommunicationItems @()
+
+        $preview.CutoffDate | Should -Be 'N/A'
+        $preview.ImpactCount | Should -Be 0
+    }
+
+    It 'uses an exact date from official text when it agrees with structured availability' {
+        $item = [pscustomobject]@{
+            Title          = 'Retirement of NP-series virtual machines'
+            Description    = 'NP-series virtual machines will retire on May 31, 2027.'
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' })
+        }
+
+        Get-ReleaseCommunicationRetirementDate -Item $item | Should -Be '2027-05-31'
+    }
+
+    It 'falls back to the first day of the structured retirement month' {
+        $item = [pscustomobject]@{
+            Title          = 'Retirement of NP-series virtual machines'
+            Description    = 'Retirement is planned for May 2027.'
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' })
+        }
+
+        Get-ReleaseCommunicationRetirementDate -Item $item | Should -Be '2027-05-01'
+    }
+
+    It 'prefers the structured retirement month when a text date conflicts with it' {
+        $item = [pscustomobject]@{
+            Title          = 'Retirement of NP-series virtual machines'
+            Description    = 'NP-series virtual machines will retire on May 31, 2027.'
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'June' })
+        }
+
+        Get-ReleaseCommunicationRetirementDate -Item $item | Should -Be '2027-06-01'
+    }
+
+    It 'rejects false-positive series evidence for <Case>' -ForEach @(
+        @{
+            Case = 'missing structured availability'
+            Item = [pscustomobject]@{
+                Title = 'NP-series retirement'; Description = 'NP-series retires May 31, 2027.'
+                Link = 'https://azure.microsoft.com/updates?id=no-availability'; Categories = @('Compute')
+                Tags = @('Retirements'); Availabilities = @()
+            }
+        }
+        @{
+            Case = 'a non-retirement availability ring'
+            Item = [pscustomobject]@{
+                Title = 'NP-series retirement'; Description = 'NP-series retires May 31, 2027.'
+                Link = 'https://azure.microsoft.com/updates?id=wrong-ring'; Categories = @('Compute')
+                Tags = @('Retirements'); Availabilities = @([pscustomobject]@{ ring = 'GeneralAvailability'; year = 2027; month = 'May' })
+            }
+        }
+        @{
+            Case = 'a series token embedded inside another word'
+            Item = [pscustomobject]@{
+                Title = 'XNP-seriesX retirement'; Description = 'The XNP-seriesX product retires May 31, 2027.'
+                Link = 'https://azure.microsoft.com/updates?id=token-boundary'; Categories = @('Compute')
+                Tags = @('Retirements'); Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' })
+            }
+        }
+    ) {
+        $series = @(Get-ReleaseCommunicationRetirementSeries -Items @($Item) -SkuNames @('Standard_NP10s'))
+
+        $series.Count | Should -Be 0
+    }
+
+    It 'creates an official retirement only for a series present in tenant inventory' {
+        $item = [pscustomobject]@{
+            Title          = 'Retirement of NP-series virtual machines'
+            Description    = 'NP-series virtual machines will retire on May 31, 2027.'
+            Link           = 'https://azure.microsoft.com/updates?id=548497'
+            Categories     = @('Compute', 'Virtual Machines', 'Retirements')
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' })
+        }
+
+        $series = @(Get-ReleaseCommunicationRetirementSeries -Items @($item) -SkuNames @('Standard_NP10s', 'Standard_D2_v2'))
+
+        $series.Count | Should -Be 1
+        $series[0].SeriesName | Should -Be 'NP-series'
+        $series[0].RetireOn | Should -Be '2027-05-31'
+        $series[0].Source | Should -Be 'ReleaseCommunicationsApi'
+        $series[0].SourceGate | Should -Be 'ReleaseCommunicationsApi'
+        $evidence = Get-RetirementEvidence -RetirementEntry $series[0]
+        $evidence.EvidenceType | Should -Be 'PublicOfficialAnnouncement'
+        $evidence.Confidence | Should -Be 'High'
+    }
+
+    It 'keeps Learn priority and uses Release Communications for an uncovered family' {
+        Mock Write-Log {}
+        Mock Get-OfficialRetirementsFromLearnMarkdown {
+            [pscustomobject]@{
+                Ok     = $true
+                Series = @([pscustomobject]@{
+                    SeriesName = 'Dv2-series'; Status = 'Announced'; RetireOn = '2028-05-01'; Notes = ''
+                    Source = 'LiveLearnMarkdown'; MigrationGuide = 'https://learn.microsoft.com/test'
+                    Announcement = 'https://azure.microsoft.com/learn-notice'; SourceUrl = 'https://learn.microsoft.com/test'
+                    AsOf = '2026-01-01T00:00:00Z'; SourceGate = 'LiveLearnMarkdown'; IsLive = $true
+                })
+            }
+        }
+        $items = @(
+            [pscustomobject]@{ Title = 'Dv2-series retirement'; Description = 'Retires May 1, 2029.'; Link = 'https://azure.microsoft.com/updates?id=dv2'; Categories = @('Compute'); Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2029; month = 'May' }) },
+            [pscustomobject]@{ Title = 'NP-series retirement'; Description = 'Retires May 31, 2027.'; Link = 'https://azure.microsoft.com/updates?id=np'; Categories = @('Compute'); Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' }) }
+        )
+
+        $retirements = Get-Retirements -UseOfficialList $true -UsePortalSource $false -ReleaseCommunicationItems $items -InventorySkuNames @('Standard_D2_v2', 'Standard_NP10s') -ReleaseCommunicationsOk $true
+        $dv2 = Resolve-RetirementForSku -SkuName 'Standard_D2_v2' -Retirements $retirements
+        $np = Resolve-RetirementForSku -SkuName 'Standard_NP10s' -Retirements $retirements
+
+        $dv2.Source | Should -Be 'LiveLearnMarkdown'
+        $dv2.RetireOn | Should -Be '2028-05-01'
+        $np.Source | Should -Be 'ReleaseCommunicationsApi'
+        $np.RetireOn | Should -Be '2027-05-31'
+        $retirements.StreamCSeriesCount | Should -Be 2
+        Assert-MockCalled Write-Log -Times 1 -Exactly -ParameterFilter {
+            $Message -eq 'Load-Retirements: STREAM C succeeded. Tenant-matched series=2; added=1; superseded by Learn=1.' -and $Level -eq 'INFO'
+        }
+    }
+
+    It 'includes full history and does not cap the rendered notices at 30' {
+        $indexRecords = @(1..35 | ForEach-Object { @{ id = [string]$_; modified = '2020-01-01T00:00:00Z' } })
+        Mock Invoke-WebRequest {
+            param($Uri)
+            if ([string]$Uri -match '/azure/(\d+)$') {
+                $id = $Matches[1]
+                $detail = @{ id = $id; title = "Official notice $id"; description = 'No classifier keywords'; status = 'Published'; created = '2020-01-01T00:00:00Z'; modified = '2020-01-01T00:00:00Z'; tags = @('Retirements'); products = @('Virtual Machines'); productCategories = @('Compute'); availabilities = @() }
+                return [pscustomobject]@{ Content = ($detail | ConvertTo-Json -Depth 10) }
+            }
+            [pscustomobject]@{ Content = (@{ value = $indexRecords } | ConvertTo-Json -Depth 10) }
+        }
+
+        $result = Get-ReleaseCommunicationsPreview -Url 'https://www.microsoft.com/releasecommunications/api/v2/azure' -LookbackMonths 0
+
+        $result.Ok | Should -BeTrue
+        $result.TotalItems | Should -Be 35
+        $result.RelevantCount | Should -Be 35
+        $result.ReviewOnlyCount | Should -Be 35
+    }
+
+    It 'does not duplicate orderby when the configured URL already includes it' {
+        $script:ReleaseCommunicationsRequestUri = ''
+        Mock Invoke-WebRequest {
+            param($Uri)
+            $script:ReleaseCommunicationsRequestUri = [string]$Uri
+            [pscustomobject]@{ Content = '{"value":[]}' }
+        }
+
+        $url = 'https://www.microsoft.com/releasecommunications/api/v2/azure?$filter=tags/any(t:%20t%20eq%20%27Retirements%27)&$orderby=modified%20desc'
+        $result = Get-ReleaseCommunicationsApiItems -Url $url
+
+        $result.Ok | Should -BeTrue
+        ([regex]::Matches($script:ReleaseCommunicationsRequestUri, '(?i)\$orderby=').Count) | Should -Be 1
+    }
+
+    It 'keeps an absent cache array-shaped under strict mode' {
+        & {
+            Set-StrictMode -Version Latest
+            Mock Invoke-WebRequest {
+                [pscustomobject]@{ Content = '{"value":[]}' }
+            }
+
+            $cacheDir = Join-Path $TestDrive 'release-communications-empty-cache'
+            New-Item -ItemType Directory -Path $cacheDir | Out-Null
+            $result = Get-ReleaseCommunicationsApiItems -Url 'https://www.microsoft.com/releasecommunications/api/v2/azure' -CacheDir $cacheDir -UseCache $true
+
+            $result.Ok | Should -BeTrue
+            $result.CachedTotal | Should -Be 0
+            $result.CacheMode | Should -Be 'FullRefresh'
+        }
+    }
+
+    It 'queries the retirement index and maps the per-ID detail to a report item' {
+                $fixture = @'
+{
+    "@odata.context": "https://example.test/$metadata#Azure",
+    "value": [
+        {
+            "id": "567444",
+            "productCategories": ["Compute"],
+            "tags": ["Retirements"],
+            "products": ["Virtual Machines"],
+            "title": "Retirement: test VM series",
+            "description": "Test notice",
+            "status": null,
+            "created": "2026-07-13T17:04:04.0000000Z",
+            "modified": "2026-07-13T17:04:04.0000000Z",
+            "availabilities": [{ "ring": "Retirement", "year": 2027, "month": "July" }]
+        }
+    ]
+}
+'@
+                $script:ReleaseCommunicationsRequestUris = @()
+                Mock Invoke-WebRequest {
+                        param($Uri)
+                    $script:ReleaseCommunicationsRequestUris += [string]$Uri
+                    if ([string]$Uri -match '/azure/567444$') {
+                        $detail = ($fixture | ConvertFrom-Json).value[0]
+                        return [pscustomobject]@{ Content = ($detail | ConvertTo-Json -Depth 10) }
+                    }
+                        [pscustomobject]@{ Content = $fixture }
+                }
+
+                $url = 'https://www.microsoft.com/releasecommunications/api/v2/azure?$filter=tags/any(t:%20t%20eq%20%27Retirements%27)'
+                $result = Get-ReleaseCommunicationsApiItems -Url $url -LookbackMonths 12
+
+                $result.Ok | Should -BeTrue
+                $result.PageCount | Should -Be 1
+                @($result.Items).Count | Should -Be 1
+                $result.Items[0].Guid | Should -Be '567444'
+                $result.Items[0].PublishedDate | Should -Be '2026-07-13'
+                $result.Items[0].Link | Should -Be 'https://azure.microsoft.com/updates?id=567444'
+                $result.Items[0].Categories | Should -Contain 'Compute'
+                $result.Items[0].Categories | Should -Contain 'Virtual Machines'
+                $result.Items[0].Categories | Should -Contain 'Retirements'
+                @($script:ReleaseCommunicationsRequestUris).Count | Should -Be 2
+                $script:ReleaseCommunicationsRequestUris[0] | Should -Match '\$filter=tags/any'
+                [uri]::UnescapeDataString($script:ReleaseCommunicationsRequestUris[0]) | Should -Match '\$orderby=modified desc'
+                $script:ReleaseCommunicationsRequestUris[1] | Should -Match '/api/v2/azure/567444$'
+            }
+
+            It 'reuses a fresh cache and refreshes only changed details after the daily TTL' {
+                $script:ReleaseCommunicationsPhase = 'Full'
+                $script:ReleaseCommunicationsRequestUris = @()
+                Mock Invoke-WebRequest {
+                    param($Uri)
+                    $script:ReleaseCommunicationsRequestUris += [string]$Uri
+                    if ([string]$Uri -match '/azure/567444$') {
+                        $modified = if ($script:ReleaseCommunicationsPhase -eq 'Delta') { '2026-07-14T17:04:04.0000000Z' } else { '2026-07-13T17:04:04.0000000Z' }
+                        $detail = [pscustomobject]@{ id = '567444'; title = 'Retirement: test VM series'; description = 'Test notice'; created = '2026-07-13T17:04:04.0000000Z'; modified = $modified; tags = @('Retirements') }
+                        return [pscustomobject]@{ Content = ($detail | ConvertTo-Json -Depth 10) }
+                    }
+                    $modified = if ($script:ReleaseCommunicationsPhase -eq 'Delta') { '2026-07-14T17:04:04.0000000Z' } else { '2026-07-13T17:04:04.0000000Z' }
+                    [pscustomobject]@{ Content = (@{ value = @(@{ id = '567444'; modified = $modified }) } | ConvertTo-Json -Depth 10) }
+                }
+
+                $cacheDir = Join-Path $TestDrive 'release-communications-cache'
+                New-Item -ItemType Directory -Path $cacheDir | Out-Null
+                $url = 'https://www.microsoft.com/releasecommunications/api/v2/azure?$filter=tags/any(t:%20t%20eq%20%27Retirements%27)'
+                $initial = Get-ReleaseCommunicationsApiItems -Url $url -LookbackMonths 12 -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+                $script:ReleaseCommunicationsRequestUris = @()
+                $cached = Get-ReleaseCommunicationsApiItems -Url $url -LookbackMonths 12 -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+
+                $initial.CacheMode | Should -Be 'FullRefresh'
+                $cached.CacheMode | Should -Be 'CacheHit'
+                @($script:ReleaseCommunicationsRequestUris).Count | Should -Be 0
+
+                Get-ChildItem -Path $cacheDir -Filter 'release_communications_retirements_index_*.json' | ForEach-Object { $_.LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddDays(-2) }
+                $script:ReleaseCommunicationsPhase = 'Delta'
+                $delta = Get-ReleaseCommunicationsApiItems -Url $url -LookbackMonths 12 -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+
+                $delta.CacheMode | Should -Be 'DeltaRefresh'
+                $delta.DetailUpdates | Should -Be 1
+                @($script:ReleaseCommunicationsRequestUris).Count | Should -Be 2
+                [uri]::UnescapeDataString($script:ReleaseCommunicationsRequestUris[0]) | Should -Match 'modified gt'
+                $script:ReleaseCommunicationsRequestUris[1] | Should -Match '/api/v2/azure/567444$'
+        }
+
+        It 'retains cached details when a stale-index delta contains no changes' {
+            $script:ReleaseCommunicationsPhase = 'Full'
+            $script:ReleaseCommunicationsRequestUris = @()
+            Mock Invoke-WebRequest {
+                param($Uri)
+                $script:ReleaseCommunicationsRequestUris += [string]$Uri
+                if ([string]$Uri -match '/azure/567444$') {
+                    if ($script:ReleaseCommunicationsPhase -ne 'Full') { throw 'Delta refresh must not redownload unchanged details.' }
+                    $detail = [pscustomobject]@{
+                        id = '567444'; title = 'Retirement: cached VM series'; description = 'Cached detail'
+                        created = '2026-07-13T17:04:04.0000000Z'; modified = '2026-07-13T17:04:04.0000000Z'
+                        tags = @('Retirements'); products = @('Virtual Machines'); productCategories = @('Compute')
+                        availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'July' })
+                    }
+                    return [pscustomobject]@{ Content = ($detail | ConvertTo-Json -Depth 10) }
+                }
+                if ($script:ReleaseCommunicationsPhase -eq 'Delta') {
+                    return [pscustomobject]@{ Content = '{"value":[]}' }
+                }
+                [pscustomobject]@{ Content = (@{ value = @(@{ id = '567444'; modified = '2026-07-13T17:04:04.0000000Z' }) } | ConvertTo-Json -Depth 10) }
+            }
+
+            $cacheDir = Join-Path $TestDrive 'release-communications-empty-delta'
+            New-Item -ItemType Directory -Path $cacheDir | Out-Null
+            $url = 'https://www.microsoft.com/releasecommunications/api/v2/azure?$filter=tags/any(t:%20t%20eq%20%27Retirements%27)'
+            $initial = Get-ReleaseCommunicationsApiItems -Url $url -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+            Get-ChildItem -Path $cacheDir -Filter 'release_communications_retirements_index_*.json' | ForEach-Object { $_.LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddDays(-2) }
+            $script:ReleaseCommunicationsPhase = 'Delta'
+            $script:ReleaseCommunicationsRequestUris = @()
+
+            $delta = Get-ReleaseCommunicationsApiItems -Url $url -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+
+            $initial.Items.Count | Should -Be 1
+            $delta.CacheMode | Should -Be 'DeltaRefresh'
+            $delta.DetailUpdates | Should -Be 0
+            $delta.CachedTotal | Should -Be 1
+            $delta.Items.Count | Should -Be 1
+            $delta.Items[0].Guid | Should -Be '567444'
+            @($script:ReleaseCommunicationsRequestUris).Count | Should -Be 1
+            [uri]::UnescapeDataString($script:ReleaseCommunicationsRequestUris[0]) | Should -Match 'modified gt'
+        }
+
+        It 'forces index and detail refresh even while the cache is fresh' {
+            $script:ReleaseCommunicationsPhase = 'Initial'
+            $script:ReleaseCommunicationsRequestUris = @()
+            Mock Invoke-WebRequest {
+                param($Uri)
+                $script:ReleaseCommunicationsRequestUris += [string]$Uri
+                if ([string]$Uri -match '/azure/567444$') {
+                    $detail = [pscustomobject]@{
+                        id = '567444'; title = "Retirement: $($script:ReleaseCommunicationsPhase) VM series"; description = 'Test detail'
+                        created = '2026-07-13T17:04:04.0000000Z'; modified = '2026-07-13T17:04:04.0000000Z'
+                        tags = @('Retirements'); products = @('Virtual Machines'); productCategories = @('Compute'); availabilities = @()
+                    }
+                    return [pscustomobject]@{ Content = ($detail | ConvertTo-Json -Depth 10) }
+                }
+                [pscustomobject]@{ Content = (@{ value = @(@{ id = '567444'; modified = '2026-07-13T17:04:04.0000000Z' }) } | ConvertTo-Json -Depth 10) }
+            }
+
+            $cacheDir = Join-Path $TestDrive 'release-communications-force-refresh'
+            New-Item -ItemType Directory -Path $cacheDir | Out-Null
+            $url = 'https://www.microsoft.com/releasecommunications/api/v2/azure'
+            $initial = Get-ReleaseCommunicationsApiItems -Url $url -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24
+            $script:ReleaseCommunicationsPhase = 'Forced'
+            $script:ReleaseCommunicationsRequestUris = @()
+
+            $forced = Get-ReleaseCommunicationsApiItems -Url $url -CacheDir $cacheDir -UseCache $true -CacheTtlHours 24 -ForceRefresh $true
+
+            $initial.CacheMode | Should -Be 'FullRefresh'
+            $forced.CacheMode | Should -Be 'FullRefresh'
+            $forced.DetailUpdates | Should -Be 1
+            $forced.Items[0].Title | Should -Be 'Retirement: Forced VM series'
+            @($script:ReleaseCommunicationsRequestUris).Count | Should -Be 2
+            $script:ReleaseCommunicationsRequestUris[1] | Should -Match '/api/v2/azure/567444$'
+        }
+}
+
 Describe 'Microsoft Learn retirement ingestion' {
     It 'parses every retirement table, not only the first table' {
         $fixture = @'
@@ -191,11 +572,14 @@ Describe 'Microsoft Learn retirement ingestion' {
                 }
             }
             Series = @([pscustomobject]@{
-                SeriesName  = 'Dv2-series'
-                Status      = 'Announced'
-                RetireOn    = '2028-05-01'
+                SeriesName   = 'Dv2-series'
+                Status       = 'Announced'
+                RetireOn     = '2028-05-01'
+                Notes        = ''
+                MigrationGuide = 'https://learn.microsoft.com/test'
+                Announcement = 'https://azure.microsoft.com/test'
                 MatchRegexes = @()
-                Source      = 'LiveLearnMarkdown'
+                Source       = 'LiveLearnMarkdown'
             })
         }
 
@@ -207,6 +591,36 @@ Describe 'Microsoft Learn retirement ingestion' {
 }
 
 Describe 'Live-source integrity' {
+    It 'preserves the Advisor monitoring retirement date without a hardcoded fallback' {
+        $withDate = @(ConvertTo-NormalizedMonitoringLifecycleRows -MonitoringRows @(
+            [pscustomobject]@{ ResourceId = '/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/dated'; RetireOn = '2029-01-15' }
+        ))
+        $withoutDate = @(ConvertTo-NormalizedMonitoringLifecycleRows -MonitoringRows @(
+            [pscustomobject]@{ ResourceId = '/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/undated'; RetireOn = 'N/A' }
+        ))
+        $duplicate = @(ConvertTo-NormalizedMonitoringLifecycleRows -MonitoringRows @(
+            [pscustomobject]@{ ResourceId = '/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/duplicate'; RetireOn = 'N/A' }
+            [pscustomobject]@{ ResourceId = '/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/duplicate'; RetireOn = '2029-02-01' }
+        ))
+
+        $withDate[0].RetireOn | Should -Be '2029-01-15'
+        $withoutDate[0].RetireOn | Should -Be 'N/A'
+        $duplicate.Count | Should -Be 1
+        $duplicate[0].RetireOn | Should -Be '2029-02-01'
+    }
+
+    It 'accepts Release Communications as the only available official source in strict mode' {
+        $item = [pscustomobject]@{
+            Title = 'NP-series retirement'; Description = 'Retires May 31, 2027.'
+            Link = 'https://azure.microsoft.com/updates?id=np'; Categories = @('Compute')
+            Availabilities = @([pscustomobject]@{ ring = 'Retirement'; year = 2027; month = 'May' })
+        }
+
+        {
+            Get-Retirements -UseOfficialList $false -UsePortalSource $false -RequireLiveRetirementSource $true -ReleaseCommunicationItems @($item) -InventorySkuNames @('Standard_NP10s') -ReleaseCommunicationsOk $true
+        } | Should -Not -Throw
+    }
+
     It 'fails closed when strict mode has only a failed Advisor source' {
         Mock Search-AzGraph { throw 'simulated ARG outage' }
 
@@ -412,6 +826,25 @@ Describe 'External contract defaults' {
         }, $true) | Select-Object -First 1
 
         $function.Extent.Text | Should -Not -Match "PriceType\s*=\s*'SavingsPlan'"
+    }
+
+    It 'pins the default Stream C endpoint to the Microsoft HTTPS API' {
+        $parameter = $script:SourceAst.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'ReleaseCommunicationsApiUrl'
+        }
+        $uri = [uri][string]$parameter.DefaultValue.Value
+
+        $uri.Scheme | Should -Be 'https'
+        $uri.Host | Should -Be 'www.microsoft.com'
+        $uri.AbsolutePath | Should -Be '/releasecommunications/api/v2/azure'
+        [uri]::UnescapeDataString($uri.Query) | Should -Match "tags/any\(t:\s*t\s*eq\s*'Retirements'\)"
+    }
+
+    It 'assigns low confidence to an unrecognized evidence source' {
+        $evidence = Get-RetirementEvidence -RetirementEntry ([pscustomobject]@{ Source = 'UntrustedFixture' })
+
+        $evidence.EvidenceType | Should -Be 'UnknownSource'
+        $evidence.Confidence | Should -Be 'Low'
     }
 }
 
@@ -768,6 +1201,7 @@ Describe 'Known-good control behavior' {
             Region                    = 'eastus'
             RetirementDate            = '2028-11-15'
             RetirementRiskLevel        = 'Medium'
+            RetirementClass            = 'SkuFamily'
             RetirementSourceGate       = 'LiveLearnMarkdown'
             EvidenceSource             = 'LiveLearnMarkdown'
             WorkloadRole               = 'Infrastructure-DomainController'
@@ -814,8 +1248,10 @@ Describe 'Known-good control behavior' {
             RetailDeltaMonthly         = 0
             CostDeltaPercent           = 0
             RetirementRiskLevel        = 'Medium'
+            RetirementClass            = 'SkuFamily'
             RetirementSourceGate       = 'LiveLearnMarkdown'
             EvidenceSource             = 'LiveLearnMarkdown'
+            SourceTag                  = 'Learn (SKU-family, verify in Workbook)'
             WorkloadRole               = 'Infrastructure-DomainController'
             SensitiveWorkload          = $true
             GenerationChange           = $true
@@ -834,6 +1270,9 @@ Describe 'Known-good control behavior' {
             SkuFamily                   = 1
             GeneratedAtUtc              = '2026-07-13 00:00:00'
             MonitoringDistinctVmCount   = 0
+            MonitoringConfirmed         = 0
+            MonitoringUnconfirmed       = 0
+            MonitoringUnknown           = 0
             Rows                        = @($row)
         }
         $plan = Build-RemediationPlan -Rows @($row)
@@ -914,8 +1353,10 @@ Describe 'Known-good control behavior' {
             RetailDeltaMonthly         = 0
             CostDeltaPercent           = 0
             RetirementRiskLevel        = 'High'
+            RetirementClass            = 'SkuFamily'
             RetirementSourceGate       = 'LiveLearnMarkdown'
             EvidenceSource             = 'LiveLearnMarkdown'
+            SourceTag                  = 'Learn (SKU-family, verify in Workbook)'
             SensitiveWorkload          = $false
             GenerationChange           = $false
             RecommendationBasis        = 'test'
@@ -933,6 +1374,9 @@ Describe 'Known-good control behavior' {
             SkuFamily                   = 1
             GeneratedAtUtc              = '2026-07-13 00:00:00'
             MonitoringDistinctVmCount   = 0
+            MonitoringConfirmed         = 0
+            MonitoringUnconfirmed       = 0
+            MonitoringUnknown           = 0
             Rows                        = @($row)
         }
         $plan = Build-RemediationPlan -Rows @($row)
@@ -941,8 +1385,8 @@ Describe 'Known-good control behavior' {
         ConvertTo-SimplifiedReportHtml -Facts $facts -Path $path -RemediationPlan $plan
         $html = Get-Content -LiteralPath $path -Raw
 
-        $html | Should -Match '<div class="decision-tag">This sprint</div>\s*<div class="decision-value">0</div>\s*<div class="decision-title">Act now \(W0\)</div>'
-        $html | Should -Match '<div class="decision-tag">Next wave</div>\s*<div class="decision-value">1</div>\s*<div class="decision-title">Plan with validation \(W1 \+ W2 \+ W3\)</div>'
+        $html | Should -Match '<div class="decision-tag">This sprint<span class="info-dot"[^>]*>i</span></div>\s*<div class="decision-value">0</div>\s*<div class="decision-title">Act now \(W0\)</div>'
+        $html | Should -Match '<div class="decision-tag">Next wave<span class="info-dot"[^>]*>i</span></div>\s*<div class="decision-value">1</div>\s*<div class="decision-title">Plan with validation \(W1 \+ W2 \+ W3\)</div>'
         $html | Should -Not -Match 'Act now \(W0 \+ W1\)'
     }
 
@@ -983,6 +1427,7 @@ Describe 'Known-good control behavior' {
             Region                    = 'eastus'
             RetirementDate            = '2028-05-01'
             RetirementRiskLevel        = 'Medium'
+            RetirementClass            = 'SkuFamily'
             RetirementSourceGate       = 'LiveLearnMarkdown'
             EvidenceSource             = 'LiveLearnMarkdown'
             SensitiveWorkload          = $false
@@ -1002,12 +1447,20 @@ Describe 'Known-good control behavior' {
         $row = [pscustomobject]@{
             VmName                     = 'checklist-filter'
             CurrentSku                 = 'Standard_B4ms'
+            RecommendedSku             = 'Standard_B4as_v2'
             CandidateTargetSku         = 'Standard_B4as_v2'
             Region                     = 'uksouth'
             RetirementDate             = '2028-11-15'
             RetirementRiskLevel        = 'Medium'
+            RetirementClass            = 'SkuFamily'
             RetirementSourceGate       = 'LiveLearnMarkdown'
             EvidenceSource             = 'LiveLearnMarkdown'
+            SourceTag                  = 'Learn (SKU-family, verify in Workbook)'
+            WhatHappens                = 'Microsoft Learn SKU-family retirement: verify VM scope in Workbook'
+            Validation                 = 'Validate target compatibility and regional availability.'
+            NextStep                   = 'Schedule SKU migration.'
+            RetailDeltaMonthly         = $null
+            CostDeltaPercent           = $null
             SensitiveWorkload          = $false
             GenerationChange           = $false
             RecommendationBasis        = 'Rule-based: burstable continuity (same CPU credit model)'
@@ -1036,6 +1489,9 @@ Describe 'Known-good control behavior' {
             SkuFamily                   = 1
             GeneratedAtUtc              = '2026-07-13 00:00:00'
             MonitoringDistinctVmCount   = 0
+            MonitoringConfirmed         = 0
+            MonitoringUnconfirmed       = 0
+            MonitoringUnknown           = 0
             Rows                        = @($row)
         }
         $path = Join-Path $TestDrive 'checklist-filter.html'

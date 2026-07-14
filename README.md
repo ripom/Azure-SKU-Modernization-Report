@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.6`
+**Current version:** `v0.7`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -37,11 +37,30 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
     **Service Upgrade and Retirement** subcategory — no hardcoded list of recommendation type IDs,
     so every SKU family (present and future) is captured automatically.
   - Stream B: Microsoft Learn markdown (SKU-family)
+  - Stream C: Microsoft Release Communications JSON API (SKU-family)
   - No hardcoded fallback list.
-- **Release Communications RSS is context-only.** Stream C reads the Microsoft Release Communications
-  RSS feed for official public communications in the selected lookback window. RSS items are rendered
-  as **Corroborated**, **FinOps** or **Review-only** context, but they never create retirement rows,
-  change executive counts, alter remediation waves or add backlog items.
+- **Release Communications API is an official retirement source.** Stream C reads official public
+  communications across all available history by default. A notice creates a SKU-family finding only when
+  it has structured retirement availability and deterministically names a SKU family present in tenant
+  inventory. Microsoft Learn retains priority when both sources cover the same family. Unmatched notices are
+  still rendered as **Corroborated**, **FinOps** or **Review-only** coverage context.
+
+  Official Microsoft endpoint:
+
+  ```text
+  https://www.microsoft.com/releasecommunications/api/v2/azure
+  ```
+
+  The script's default query restricts that endpoint to retirement notices for the Compute products covered
+  by the report:
+
+  ```text
+  https://www.microsoft.com/releasecommunications/api/v2/azure?$filter=tags/any(t:%20t%20eq%20%27Retirements%27)%20and%20(products/any(p:%20p%20eq%20%27Azure%20Dedicated%20Host%27)%20or%20products/any(p:%20p%20eq%20%27Azure%20Kubernetes%20Service%20(AKS)%27)%20or%20products/any(p:%20p%20eq%20%27Azure%20Linux%27)%20or%20products/any(p:%20p%20eq%20%27Batch%27)%20or%20products/any(p:%20p%20eq%20%27Linux%20Virtual%20Machines%27)%20or%20products/any(p:%20p%20eq%20%27Virtual%20Machine%20Scale%20Sets%27)%20or%20products/any(p:%20p%20eq%20%27Virtual%20Machines%27)%20or%20products/any(p:%20p%20eq%20%27Windows%20Virtual%20Machines%27))&$orderby=modified%20desc
+  ```
+- **Trust describes provenance, not per-resource certainty.** `High` confidence means that evidence came
+  through an accepted official-source path and passed deterministic validation. Advisor is tenant-specific;
+  Learn and Release Communications remain public SKU-family evidence and still require impacted-resource
+  reconciliation in Service Health or the Retirement Workbook.
 - **Retirement vs upgrade split.** The Advisor subcategory contains both genuine retirements and
   pure upgrade prompts. A signal is treated as a **retirement** only when it carries a retirement
   date; upgrade-only signals (no date) are captured separately and are **not** counted on the
@@ -51,7 +70,8 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
   verified in Azure Advisor, Service Health and the Azure Retirement Workbook. The HTML report carries
   an explicit disclaimer and an **Analysis Coverage** section describing what is and is not covered.
 - **Separate monitoring lifecycle.** Dependency Agent / VM Insights Map retirement is tracked in a
-  separate section and does not contribute to the compute SKU retirement count.
+  separate section and does not contribute to the compute SKU retirement count. Its per-resource
+  retirement date is read from the live Azure Advisor recommendation; no fallback date is embedded.
 - **Presentation-only dashboard.** The HTML dashboard reads already-computed facts, remediation waves
   and provenance values. It does not reclassify rows or recompute retirement counts, cost deltas,
   wave assignments, evidence classes or SKU recommendations.
@@ -66,7 +86,8 @@ and a scan-first HTML dashboard in `out/<timestamp>/`.
   without quantifying the financial effect (effective RI/SP pricing is out of scope).
 - **Reserved Instance cutoff planning is Public Preview.** The report separately flags compute
   resources whose VM size family is affected by the Reserved VM Instance new purchase/renewal cutoff
-  (`2026-07-01`). This is a FinOps planning signal, not a VM shutdown signal, and it does **not**
+  announced through Release Communications. The cutoff date and affected family names are extracted
+  from the official API record, not maintained as a static list. This is a FinOps planning signal, not a VM shutdown signal, and it does **not**
   prove that an active reservation exists in the tenant. It does **not** change the VM retirement-path
   count, CSV backlog or remediation wave totals.
 - **Azure Batch pool exposure is Public Preview.** Batch pools are separate Azure Batch resources that
@@ -94,7 +115,8 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 ## Review tests
 
 The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
-recommendation safety, cost publication guards, backlog selection and external API contracts.
+recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.7`
+baseline contains 126 tests and is validated with Pester 5.7.1.
 
 Run it with Pester 5:
 
@@ -103,6 +125,35 @@ Remove-Module Pester -ErrorAction SilentlyContinue
 Import-Module Pester -MinimumVersion 5.0 -Force
 Invoke-Pester .\review\AzureSkuModernizationReport.Review.Tests.ps1 -Output Detailed
 ```
+
+### What the tests establish about trust
+
+The Pester suite validates the report's deterministic **trust policy**, not the absolute truth of an
+external publication. It verifies that:
+
+- the default Stream C endpoint uses the expected Microsoft HTTPS host and API path;
+- Advisor is treated as tenant-specific evidence, while Learn and Release Communications remain
+  SKU-family evidence;
+- Stream C requires structured retirement availability, a retirement ring, a boundary-safe SKU-family
+  mention and a family present in tenant inventory;
+- commercial RI purchase/renewal notices cannot become technical VM-size retirements;
+- unknown sources receive low confidence, unavailable official data is not fabricated, and strict mode
+  fails closed when every enabled live source fails;
+- source counts, evidence classes, remediation waves and rendered totals reconcile before publication.
+
+`High` confidence means that the evidence came through an accepted official-source path and passed the
+report's deterministic gates. For Learn and Release Communications it does **not** prove that a specific
+tenant resource is impacted; only Advisor provides per-resource evidence in this report.
+
+The suite cannot independently prove that Microsoft authored a semantically correct notice, detect every
+future wording/schema change, guarantee that Azure RBAC exposed the complete tenant scope, or replace
+Service Health impacted-resource verification. Those are external-truth and coverage risks, so final
+decisions must still be reconciled with Advisor, Service Health and the Retirement Workbook.
+
+The review suite is hermetic: external calls are mocked with controlled fixtures. This makes regressions
+repeatable and lets negative cases be tested reliably, but it is not a live integration or publisher-
+authenticity test. Runtime HTTPS validation, source-health logging and manual impacted-resource
+reconciliation remain separate operational controls.
 
 ## Prerequisites
 
@@ -163,8 +214,8 @@ Important scope notes:
   SKU availability and restrictions, so it is not tied to one specific VM resource.
 - **Azure Resource Graph** returns only resources the identity can read. Narrow scopes produce narrow
   results; this is valid when intentional, but it is not a complete subscription report.
-- **Azure Retail Prices API and Microsoft Learn retirement data** are public sources; they do not require
-  tenant-specific Azure RBAC.
+- **Azure Retail Prices API, Microsoft Learn retirement data and Microsoft Release Communications**
+  are public sources; they do not require tenant-specific Azure RBAC.
 
 No elevated roles such as `Contributor`, `Owner`, `Virtual Machine Contributor`, `Cost Management
 Reader`, or reservation administrator roles are required for the default report. The report estimates
@@ -185,9 +236,10 @@ reservation inventory, invoices, negotiated prices, or Cost Management data.
   [-Currency <string>] `
   [-RequireLiveRetirementSource <bool>] `
   [-BatchManagementApiVersion <string>] `
-  [-UseReleaseCommunicationRss <bool>] `
-  [-ReleaseCommunicationRssUrl <string>] `
-  [-RssLookbackMonths <int>] `
+  [-UseReleaseCommunicationsApi <bool>] `
+  [-ReleaseCommunicationsApiUrl <string>] `
+  [-ReleaseCommunicationsLookbackMonths <int>] `
+  [-ReleaseCommunicationsCacheTtlHours <int>] `
   [-ForceRefreshCache]
 ```
 
@@ -239,7 +291,7 @@ when available, and produces CSV/JSON/HTML.
   -RequireLiveRetirementSource $true
 ```
 
-Use this mode when a report must not be produced if both live retirement sources are unavailable.
+Use this mode when a report must not be produced if all enabled live retirement sources are unavailable.
 
 ## How the script works
 
@@ -247,12 +299,16 @@ At a high level the script follows this deterministic pipeline:
 
 1. **Inventory:** reads standalone VMs from Azure Resource Graph. Public Preview sidecars also read
   Azure Batch pools and VM Scale Sets as separate resource types.
-2. **Retirement sources:** loads live retirement signals from Azure Advisor Resource Graph and the
-  Microsoft Learn SKU-family source. Upgrade-only Advisor prompts without retirement dates are not
-  counted as retirements.
-3. **Release Communications context:** reads Microsoft Release Communications RSS for official public
-  notices and classifies relevant items as Corroborated, FinOps or Review-only. This stream is
-  context-only and has a counts-unchanged guard.
+2. **Retirement sources:** loads live retirement signals from Azure Advisor Resource Graph, Microsoft Learn
+  and the Microsoft Release Communications API. Upgrade-only Advisor prompts without retirement dates are
+  not counted as retirements. Stream C fills SKU-family gaps only for deterministic tenant-inventory matches
+  backed by structured retirement availability; Learn retains priority for duplicate family coverage.
+3. **Release Communications coverage:** uses the same retirement-only JSON API result for the Coverage tab.
+  The first sync caches the complete paginated retirement index and one detail document per ID. For 24 hours
+  later runs use the local cache; after the TTL, only records modified since the last successful watermark and
+  their detail documents are downloaded. All returned notices are rendered by default. Notices are
+  classified as Corroborated, FinOps or Review-only. A guard ensures Coverage rendering cannot mutate the
+  findings already computed from the source result.
 4. **SKU and price catalog:** loads compute SKU metadata plus Retail Prices data, using local caches
   when complete and fresh.
 5. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
@@ -297,8 +353,34 @@ Audience views:
 - **Coverage:** evidence and audit view with Analysis Coverage plus generated time, live-source
   provenance, as-of date and disclaimer.
 
+### How to read the Decision Room
+
+Decision Room presents two related but distinct scopes: standalone VM execution waves and total Compute
+exposure. Read the cards and chips in this order:
+
+1. The status fraction is `impacted Compute resources / scanned Compute resources`. Both sides include
+  standalone VMs, VM Scale Sets and Batch pools. Monitoring lifecycle rows are excluded.
+2. **This sprint**, **Next wave** and **Quick wins** partition standalone retirement-path VMs:
+  `W0 + (W1 + W2 + W3) + W4 = standalone VM retirement-path count`. A VM belongs to one wave only.
+3. **Preview sidecars** is impacted VMSS plus Batch pools. Add this card to the standalone VM count to
+  obtain the Compute total. Sidecars remain outside standalone VM waves and backlog.
+4. **Advisor-confirmed share** uses standalone retirement-path VMs as its denominator. `0%` means none
+  has a per-resource Advisor signal; official Microsoft Learn or Release Communications family evidence
+  may still support every finding, so this does not contradict `live sources ok`.
+5. **RI cutoff planning** is a commercial offer population. It may overlap retirement-path resources,
+  does not prove an active reservation exists and is not added to the Compute total.
+6. **Monitoring kept separate** is an Azure Monitor feature-lifecycle population. A VM may appear both
+  here and on the Compute retirement path, so this count is also not additive.
+
+For the example `10/14 | VM 9, VMSS 1, Batch 0`, ten of fourteen scanned Compute resources are on a
+retirement path. The lane cards reconcile as `0 + 4 + 5 = 9` standalone VMs; adding one VMSS sidecar
+produces the Compute total of ten. The `11` RI-cutoff resources and `8` monitoring VMs are separate,
+potentially overlapping views and must not be added to ten. The monthly amount is a PAYG/list-price delta
+for standalone VM candidates, and the nearest deadline is the earliest dated retirement finding in scope.
+
 The **Legend** control remains in the sidebar and opens a closeable guide explaining core concepts,
-wave meanings, decision sections, detail-table fields, cost caveats and validation expectations.
+wave meanings, count reconciliation, denominator choices, overlap rules, detail-table fields, cost caveats
+and validation expectations.
 
 Print/PDF output uses a dedicated `@media print` stylesheet that expands all audience views and detail
 sections sequentially so tabbed content is not hidden in exported PDFs.
@@ -321,8 +403,8 @@ pricing of a commitment is out of scope). Instead it detects **whether and when*
 commitment is on a retirement path and raises a warning:
 
 - The condition is: the current SKU is covered by a Reserved Instance **or** a Savings Plan (from the
-  Retail Prices signals) **and** the SKU is on a retirement path (official Microsoft Learn
-  announcement or per-resource Advisor signal).
+  Retail Prices signals) **and** the SKU is on a retirement path (per-resource Azure Advisor signal
+  or an official SKU-family announcement from Microsoft Learn or Release Communications).
 - For each affected VM a `WARN` is logged and the note — with the retirement date (the "when") and the
   commitment type (Reserved Instance and/or Savings Plan) — is appended to the **Validation** column of
   the detail table.
@@ -331,11 +413,12 @@ commitment is on a retirement path and raises a warning:
 - The financial effect is not quantified: it is an **attention flag**, not a number.
 
 Separately, the report includes a **Reserved Instance Cutoff Planning** Public Preview sidecar for the
-`2026-07-01` stop on new purchase/renewal of Reserved VM Instances for selected legacy families. This
-sidecar:
+stop on new purchase/renewal of Reserved VM Instances for selected legacy families. Its source is the
+official commercial notice already returned by the configured Release Communications query. This sidecar:
 
 - scans standalone VMs, Azure Batch pools and VM Scale Sets;
-- matches their normal Azure VM size field against the curated cutoff family list;
+- extracts the cutoff date and affected family names from the live notice, then matches normal Azure
+  VM size fields against those announced families;
 - summarizes the HTML view by affected VM-size family and resource count; per-resource detail remains
   in the structured CSV/JSON outputs;
 - flags both retirement-wave families and RI-cutoff-only families such as Dv3/Dsv3/Ev3/Esv3;
@@ -391,10 +474,11 @@ makes this explicit with a disclaimer banner (top and footer) and an **Analysis 
 
 - **What it covers:** Azure Advisor recommendations in the *Reliability &rarr; Service Upgrade and
   Retirement* subcategory, across all SKU families (no fixed list), with retirement date / retiring
-  feature when available, plus Microsoft Learn SKU-family exposures (Stream B). Public Preview: Azure
-  Batch pools and VM Scale Sets are scanned as separate resources and matched by their normal Azure VM
-  size fields (`vmSize` and `sku.name`); Reserved VM Instance cutoff planning is matched from a curated
-  FinOps family list.
+  feature when available, plus Microsoft Learn (Stream B) and deterministic Microsoft Release
+  Communications (Stream C) SKU-family exposures. Public Preview: Azure Batch pools and VM Scale Sets
+  are scanned as separate resources and matched by their normal Azure VM size fields (`vmSize` and
+  `sku.name`); Reserved VM Instance cutoff planning is derived from the commercial notice in Release
+  Communications.
 - **What it does NOT cover / manual verification required:**
   - Retirements present **only in Azure Service Health** (not emitted by Advisor) &mdash; check
     *Service Health &rarr; Health advisories* and the *Impacted Resources* tab.
@@ -462,10 +546,11 @@ restriction metadata, but it does not change retirement-source logic or remediat
 |---|---|---|---|
 | `-UseOfficialRetirementList` | `bool` | `$true` | Enables Stream B (Microsoft Learn markdown, SKU-family). |
 | `-UsePortalRetirementSource` | `bool` | `$true` | Enables Stream A (Azure Advisor via ARG, per-resource). |
-| `-RequireLiveRetirementSource` | `bool` | `$false` | If `$true` and **both** live sources fail, the script terminates with an error instead of proceeding with partial data. |
-| `-UseReleaseCommunicationRss` | `bool` | `$true` | Enables Stream C (Microsoft Release Communications RSS) as read-only official-communications context. It does not affect counts, waves, CSV rows or backlog items. |
-| `-ReleaseCommunicationRssUrl` | `string` | Microsoft Azure RSS endpoint | RSS feed URL for Release Communications. Change only for testing or cloud-specific routing. |
-| `-RssLookbackMonths` | `int` | `12` | Lookback window for RSS notices rendered in the Coverage tab. |
+| `-RequireLiveRetirementSource` | `bool` | `$false` | If `$true` and all enabled live sources fail, the script terminates with an error instead of proceeding with partial data. |
+| `-UseReleaseCommunicationsApi` | `bool` | `$true` | Enables Stream C (Microsoft Release Communications API). Structured retirement records that deterministically match a tenant SKU family are authoritative findings; unmatched notices remain Coverage context. |
+| `-ReleaseCommunicationsApiUrl` | `string` | Microsoft Release Communications retirement-and-compute filter | Retirement-only JSON API query restricted to Azure Dedicated Host, AKS, Azure Linux, Batch, Linux/Windows Virtual Machines, Virtual Machine Scale Sets and Virtual Machines. The verified default currently returns 78 records. Change only for testing or cloud-specific routing. |
+| `-ReleaseCommunicationsLookbackMonths` | `int` | `0` | History window for API notices rendered in the Coverage tab. `0` includes all records returned by the configured API query; a positive value limits records by their API `modified` timestamp. |
+| `-ReleaseCommunicationsCacheTtlHours` | `int` | `24` | Freshness window for the complete retirement index. A stale index triggers a modified-since query and refreshes only changed/new per-ID details. Uses the shared persistent cache controls and `-ForceRefreshCache`. |
 | `-AdvisorRetirementTypeIdBlocklist` | `string[]` | 2 GUIDs (Dependency Agent / VM Insights Map) | Advisor Type IDs that are monitoring lifecycle signals and must **never** become compute SKU retirements. |
 | `-AdvisorRetirementNameBlockPattern` | `string` | agent/monitoring regex | Fallback text match (Option B) to exclude agent/monitoring recommendations not present in the blocklist. |
 
@@ -473,11 +558,11 @@ restriction metadata, but it does not change retirement-source logic or remediat
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `-UsePersistentCache` | `bool` | `$true` | Enables the local file cache for the SKU catalog and Retail prices. |
+| `-UsePersistentCache` | `bool` | `$true` | Enables local file caches for the SKU catalog, Retail prices/commitment signals and Release Communications index/details. |
 | `-CacheRoot` | `string` | `<OutputRoot>\cache` | Cache folder; if omitted uses the `cache` subfolder of `OutputRoot`. |
 | `-SkuCacheTtlHours` | `int` | `168` | TTL (hours) of the SKU catalog cache (168 = 7 days). |
 | `-RetailCacheTtlHours` | `int` | `24` | TTL (hours) of the Retail prices cache. |
-| `-ForceRefreshCache` | `switch` | off | Forces the refresh of **all** caches (SKU catalog + Retail prices + RI/SP signals). |
+| `-ForceRefreshCache` | `switch` | off | Forces the refresh of **all** caches (SKU catalog, Retail prices, RI/SP signals and Release Communications index/details). |
 
 ### Logging
 
@@ -494,7 +579,7 @@ folder contains the human report, structured data files and audit logs for the s
 |---|---|---|
 | `sku_modernization_report.html` | CXO, CSA/Engineer, PM, FinOps | Open in a browser. This is the main self-contained report with left-side audience views: Executive Overview, CSA / Engineer, Project Plan, FinOps and Coverage. Use it for review meetings and PDF export. |
 | `sku_modernization_report.csv` | CSA/Engineer, FinOps | Flat per-VM retirement-path dataset. Use in Excel/Power BI for filtering by VM, region, current SKU, recommended SKU, wave, cost delta and validation notes. |
-| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data, including `ReleaseCommunicationContext` when RSS is enabled. Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
+| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data, including `ReleaseCommunicationContext` status and results (also present when Stream C is disabled). Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
 | `migration_backlog_items.csv` | PM, delivery lead | Work-item/backlog-friendly extract for remediation planning. Import into Azure DevOps, Planner, Jira or a spreadsheet to track owner, wave, target SKU and execution status. |
 | `advisor_hints.json` | CSA/Engineer, troubleshooting | Raw Advisor-related hints captured during analysis. Use to verify why a row was treated as Advisor-confirmed or to reconcile with Azure Advisor/Workbook views. |
 | `api_calls_log.csv` | Operations, audit | Tabular API-call trace with provider, request metadata and success/failure state. Use for quick filtering and evidence collection. |
@@ -513,10 +598,10 @@ Recommended consumption pattern:
 ## Notes
 
 - LIVE-only retirement can produce a `WARN` source-health state when not all **retirement findings**
-  are covered by live sources; with `-RequireLiveRetirementSource $true` the script terminates if both
-  live sources fail. A "retirement finding" is a VM actually on a retirement path (live Advisor/Learn
-  signal), **not** every analyzed VM: a VM with no retirement signal does not lower the source-health
-  ratio.
+  are covered by live sources; with `-RequireLiveRetirementSource $true` the script terminates if all
+  enabled live sources fail. A "retirement finding" is a VM actually on a retirement path (live
+  Advisor, Learn or Release Communications signal), **not** every analyzed VM: a VM with no retirement
+  signal does not lower the source-health ratio.
 - **OS-aware prices.** For the same SKU the Retail API exposes distinct meters for Windows and Linux
   (the Windows meter is more expensive). The price used for each VM respects the inventory's `OsType`,
   falling back to the cheapest meter when the specific meter is not available.
@@ -540,20 +625,21 @@ downgrades to `WARN`) on a specific class of defect, so a wrong number never rea
 ### Guardian layers
 
 - **`Get-RetirementSourceHealth`** — grades live-source coverage of the retirement findings:
-  - `OK`: every retirement finding is backed by a live source (Advisor ARG / Microsoft Learn).
+  - `OK`: every retirement finding is backed by a live source (Advisor ARG / Microsoft Learn / Microsoft Release Communications).
   - `WARN`: at least one live source is available but coverage is incomplete (logged, non-blocking).
   - `BLOCK`: no live source available — report generation is refused.
   - **Denominator = retirement findings only.** A "finding" is a VM actually on a retirement path
-    (live Advisor/Learn signal). A VM with no retirement signal is *not* counted, so it cannot inflate
+    (live Advisor/Learn/Release Communications signal). A VM with no retirement signal is *not* counted, so it cannot inflate
     the "stale/unknown" ratio or produce a false `WARN`.
 - **`Assert-ReportConsistency`** — hard invariants that throw on failure:
   - `AdvisorConfirmed + SkuFamily == RetireCount` (retirement-path quadrature).
   - `CostCovered + CostMissing == RetireCount`.
   - `SkuChangeWithGenChange + SkuChangeWithoutGenChange == recommended-SKU rows`.
-- **`Assert-CountsUnchangedAfterRss`** — hard invariant for Stream C:
-  - Release Communications RSS may add official context only.
+- **`Assert-CountsUnchangedAfterReleaseCommunicationCoverage`** — hard rendering invariant:
   - Retirement counts, source split, monitoring count and remediation wave totals must be identical
-    before and after RSS ingest, otherwise report generation stops.
+    before and after building the Coverage section, otherwise report generation stops.
+  - Stream C findings are computed earlier, alongside the other retirement sources; this guard only prevents
+    the later Coverage rendering pass from mutating them.
   - Monitoring presence counters reconcile to the distinct monitoring VM count; no duplicate monitoring
     `ResourceId`; a monitoring row can be `Confirmed` only from a Dependency-Agent ARG detection.
   - **`AdvisorConfirmed == advisor rows with a real Advisor recommendation ID`** — every
@@ -597,3 +683,16 @@ report's `AdvisorConfirmed`: only the entries whose resource ID is also in the a
 advisor-confirmed rows. Example: `Per-resource entries (pre-inventory join): 8` with
 `AdvisorConfirmed = 2` is correct — 8 tenant-wide advisor-flagged VMs, 2 of them in scope. The two
 numbers are **not** expected to be equal.
+
+### Reading the Stream C log entries
+
+Stream C emits three explicit lifecycle entries in `run_activity.log`:
+
+- `Attempting STREAM C` marks the start of Microsoft Release Communications API ingestion.
+- `STREAM C API succeeded` reports returned notices, cache mode, index size, updated details and pages.
+- `STREAM C succeeded` reports tenant-matched SKU families, families added to retirement evidence and
+  matches superseded by Microsoft Learn. A non-zero matched count with `added=0` is valid when Learn
+  already covers every matching family, because Stream B retains priority for duplicate family evidence.
+
+The later `Release Communications API coverage` entry reports how all returned notices were classified
+for the Coverage view; those Coverage counts are not additional retirement-path resources.

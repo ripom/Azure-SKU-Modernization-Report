@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+## v0.7 - 2026-07-14
+
+- Documented the exact official Microsoft Release Communications API endpoint and the complete default
+  Compute-retirement query used by Stream C.
+- Added explicit Stream C lifecycle logging for API/cache results, tenant-matched families, findings added
+  after Learn priority, and duplicate matches superseded by Learn.
+- Documented the evidence trust boundary: `High` represents accepted provenance and deterministic gates,
+  not per-resource certainty for public SKU-family sources; the hermetic Pester suite does not replace live
+  source-health or impacted-resource verification.
+- Aligned current documentation with the three-source model: Release Communications is now included in
+  retirement-path, public-source, source-health and RI/SP descriptions; cache documentation now covers
+  its index/detail cache and API status in structured output.
+- Expanded Decision Room guidance with visible count equations, per-card and per-chip tooltips, and a
+  legend/README explanation of denominators, sidecar addition and non-additive RI/monitoring populations.
+- Removed static RI-cutoff and Dependency Agent timeline facts. RI cutoff date and affected families now
+  come from the official Release Communications commercial notice; Dependency Agent / VM Insights Map
+  dates remain per-resource values supplied by Azure Advisor, with no fabricated fallback.
+- Prevented Reserved VM Instance purchase/renewal announcements from being misclassified as technical
+  VM-size retirement findings.
+- Promoted Microsoft Release Communications to authoritative Stream C for SKU-family retirements. Records
+  create findings only when structured retirement availability and announcement text deterministically match
+  a SKU family in tenant inventory; Microsoft Learn retains priority for duplicate family coverage.
+- Replaced the legacy Microsoft Release Communications feed endpoint with the JSON OData API and restricted its
+  default query to retirement notices for Azure Dedicated Host, AKS, Azure Linux, Batch, Linux/Windows
+  Virtual Machines, Virtual Machine Scale Sets and Virtual Machines (78 records when verified).
+- Added a persistent complete retirement index plus one cached detail document per ID. The first run downloads
+  both levels; a fresh daily cache performs no HTTP requests, while stale caches request modified-since deltas
+  and refresh only changed/new details.
+- Included every notice returned by the configured API query by default, removing the 12-month lookback and
+  30-row rendering cap. A positive lookback remains available as an opt-in parameter. Unmatched Stream C
+  notices remain Coverage context and retain official Azure Updates links.
+- Removed deprecated pre-API parameter aliases and standardized Release Communications parameters and
+  internal identifiers on API terminology.
+- Expanded the Pester 5 regression suite to 126 passing tests, including live-source separation, dynamic
+  RI-family derivation, commercial-notice exclusion, Advisor monitoring-date preservation, Stream C log
+  reconciliation, empty-delta cache retention, forced refresh of fresh index/detail caches and negative
+  trust cases for structured availability, retirement rings, token boundaries, conflicting dates, endpoint
+  provenance and unknown-source confidence.
+
 ## v0.6 - 2026-07-13
 
 - Replaced first-match remediation routing with deterministic urgency and complexity floors; the
@@ -23,17 +64,17 @@
 
 ## v0.5 - 2026-07-13
 
-- Added Microsoft Release Communications RSS as Stream C official-communications context.
-- Added `-UseReleaseCommunicationRss`, `-ReleaseCommunicationRssUrl` and `-RssLookbackMonths` parameters.
-- Added RSS classification into **Corroborated**, **FinOps** and **Review-only** buckets in the Coverage tab.
-- Tightened RSS Corroborated matching to require a retirement notice with compute context and an explicit per-notice VM series mention; short family tokens such as `B` or `F` are no longer accepted.
-- Added non-fatal RSS fetching: feed failures are logged and rendered as unavailable, while report numbers remain unchanged.
-- Hardened RSS XML parsing for BOM/encoding edge cases so a valid feed is not rendered as unavailable after a successful HTTP fetch.
-- Added `Assert-CountsUnchangedAfterRss` so RSS context cannot alter retirement counts, source split, monitoring counts or remediation wave totals.
-- Added `ReleaseCommunicationContext` to the JSON output and sidebar provenance/status for RSS checks.
+- Added Microsoft Release Communications as Stream C official-communications context.
+- Added the initial Release Communications source controls and history-window parameters.
+- Added communication classification into **Corroborated**, **FinOps** and **Review-only** buckets in the Coverage tab.
+- Tightened Corroborated matching to require a retirement notice with compute context and an explicit per-notice VM series mention; short family tokens such as `B` or `F` are no longer accepted.
+- Added non-fatal source fetching: feed failures are logged and rendered as unavailable, while report numbers remain unchanged.
+- Hardened source parsing for BOM/encoding edge cases so a valid response is not rendered as unavailable after a successful HTTP fetch.
+- Added a count invariant so communications context cannot alter retirement counts, source split, monitoring counts or remediation wave totals.
+- Added `ReleaseCommunicationContext` to the JSON output and sidebar provenance/status for source checks.
 - Fixed sidebar subscription provenance so the subscription count comes from the resolved in-scope subscription set, not only from subscriptions that produced report rows; mismatches are now logged explicitly.
-- Updated the anonymized rendered HTML example to the v0.5 report layout, including RSS context, scope-based subscription provenance and the latest Decision Room totals.
-- Documented Stream C semantics in README: RSS is context-only and never creates retirement rows, CSV rows, waves or backlog items.
+- Updated the anonymized rendered HTML example to the v0.5 report layout, including communications context, scope-based subscription provenance and the latest Decision Room totals.
+- Documented the initial Stream C semantics: communications were context-only and never created retirement rows, CSV rows, waves or backlog items.
 
 ## v0.4 - 2026-07-13
 
