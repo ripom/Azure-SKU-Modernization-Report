@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.7`
+**Current version:** `v0.8`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -15,6 +15,7 @@
 - [Common runs](#common-runs)
 - [Review tests](#review-tests)
 - [How the script works](#how-the-script-works)
+- [CPU vendor and architecture policy](#cpu-vendor-and-architecture-policy)
 - [HTML dashboard layout](#html-dashboard-layout)
 - [Cost impact on Reserved Instance / Savings Plan](#cost-impact-on-reserved-instance--savings-plan)
 - [Remediation wave plan](#remediation-wave-plan)
@@ -115,8 +116,8 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 ## Review tests
 
 The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
-recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.7`
-baseline contains 126 tests and is validated with Pester 5.7.1.
+recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.8`
+baseline contains 133 tests and is validated with Pester 5.7.1.
 
 Run it with Pester 5:
 
@@ -309,10 +310,15 @@ At a high level the script follows this deterministic pipeline:
   their detail documents are downloaded. All returned notices are rendered by default. Notices are
   classified as Corroborated, FinOps or Review-only. A guard ensures Coverage rendering cannot mutate the
   findings already computed from the source result.
-4. **SKU and price catalog:** loads compute SKU metadata plus Retail Prices data, using local caches
-  when complete and fresh.
+4. **SKU and price catalog:** loads region-scoped compute SKU metadata plus Retail Prices data, compacting
+  each Compute SKU page immediately to keep memory bounded and using local caches when complete and fresh.
 5. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
-  quota/capacity and validation caveats.
+  quota/capacity and validation caveats. When a legacy 1-vCPU B-series size such as `Standard_B1s` has
+  no equivalent modern shape, the engine can select the smallest compatible modern burstable upsize
+  while retaining cost, memory, architecture, capability and Azure scope restrictions. For x64 targets,
+  the engine prefers the current CPU vendor (Intel or AMD). A mixed-vendor target is selected only when
+  no compatible same-vendor target exists or when its known Retail price is lower; the reason is shown in
+  the recommendation note. An x64-to-ARM or ARM-to-x64 target is never proposed.
 6. **Classification:** builds standalone VM retirement facts, remediation waves and sidecar previews
   for Batch, VMSS and RI cutoff planning.
 7. **Validation gates:** checks source health, fact reconciliation, monitoring separation, OS-aware
@@ -320,6 +326,40 @@ At a high level the script follows this deterministic pipeline:
 8. **Output generation:** writes CSV, JSON, HTML and logs into the timestamped output folder.
 
 The HTML is a presentation layer over computed facts. It does not invent new counts or reclassify rows.
+
+## CPU vendor and architecture policy
+
+Candidate selection treats CPU architecture and CPU vendor as separate concerns:
+
+| Current / candidate | Selection policy |
+|---|---|
+| Intel x64 -> Intel x64 | Preferred when technically compatible. |
+| AMD x64 -> AMD x64 | Preferred when technically compatible. |
+| Intel x64 <-> AMD x64 | Allowed only when no compatible same-vendor candidate exists, or when the mixed-vendor candidate has a known lower Azure Retail price than the compatible same-vendor alternative. |
+| x64 <-> ARM64 | Never proposed. ARM is a hard architecture boundary, including when `-AllowArchitectureChange` is supplied. |
+
+When both same-vendor and mixed-vendor candidates lack a usable Retail price, the same-vendor candidate
+retains priority. A missing price is never interpreted as a saving. All normal candidate gates still apply:
+region and subscription restrictions, vCPU/memory bounds, disk and NIC capabilities, Premium/Ultra disk,
+accelerated networking, performance floor and configured cost ceiling.
+
+The vendor is read first from Compute SKU capability metadata when Azure supplies a recognized manufacturer
+or vendor field. For x64 records without that metadata, the resolver uses Azure SKU naming semantics (for
+example, the `a` variant in `Standard_B2ats_v2` identifies an AMD-based size). If the vendor cannot be
+determined, it remains `Unknown` and no Intel/AMD preference is asserted.
+
+Each recommendation row exposes the decision in structured output:
+
+| Field | Meaning |
+|---|---|
+| `CurrentCpuVendor` | Detected vendor of the current SKU: `Intel`, `AMD`, `ARM` or `Unknown`. |
+| `TargetCpuVendor` | Detected vendor of the selected target SKU. |
+| `CpuVendorChange` | `$true` only for a known Intel/AMD change. |
+| `CpuVendorChangeReason` | `LowerRetailPrice`, `NoSameVendorAlternative` or `N/A`. |
+
+For a mixed-vendor recommendation, the HTML recommendation note states whether the change was selected for
+lower Retail price or because no compatible same-vendor alternative was available. This remains a planning
+recommendation: validate vendor-sensitive licensing, native dependencies and performance before migration.
 
 ## HTML dashboard layout
 
@@ -509,13 +549,13 @@ default and effect.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-TopCandidates` | `int` | `3` | Maximum number of candidate SKUs (Option A/B/C…) proposed for each VM. |
-| `-MaxRecommendedVcpuIncreaseRatio` | `double` | `1.5` | Maximum allowed vCPU increase ratio for a candidate (1.5 = +50%). |
+| `-MaxRecommendedVcpuIncreaseRatio` | `double` | `1.5` | Maximum allowed vCPU increase ratio for a candidate (1.5 = +50%). For a 1-vCPU legacy B-series SKU with no equivalent modern shape, the burstable fallback permits only the minimum 2-vCPU step and retains all other compatibility gates. |
 | `-MaxRecommendedMemoryIncreaseRatio` | `double` | `1.5` | Maximum allowed memory increase ratio for a candidate. |
 | `-MaxRecommendedCostIncreasePercent` | `double` | `20` | Maximum tolerated retail cost increase percentage for a candidate. |
 | `-MinRecommendedPerfRatio` | `double` | `0.95` | Minimum performance (index) ratio of the candidate relative to the current SKU. |
 | `-EquivalentVcpuTolerancePercent` | `double` | `15` | vCPU percentage tolerance to consider a candidate "equivalent". |
 | `-EquivalentMemoryTolerancePercent` | `double` | `20` | Memory percentage tolerance to consider a candidate "equivalent". |
-| `-AllowArchitectureChange` | `switch` | off | Allows candidates with a different CPU architecture (x64↔Arm64); by default it stays within the same architecture. |
+| `-AllowArchitectureChange` | `switch` | off | Relaxes matching for non-ARM architecture metadata differences. ARM remains a hard boundary: the engine never proposes x64↔Arm64 migration. |
 
 ### Data sources (Advisor, Retail, SKU REST)
 
@@ -578,8 +618,8 @@ folder contains the human report, structured data files and audit logs for the s
 | File | Primary audience | How to use it |
 |---|---|---|
 | `sku_modernization_report.html` | CXO, CSA/Engineer, PM, FinOps | Open in a browser. This is the main self-contained report with left-side audience views: Executive Overview, CSA / Engineer, Project Plan, FinOps and Coverage. Use it for review meetings and PDF export. |
-| `sku_modernization_report.csv` | CSA/Engineer, FinOps | Flat per-VM retirement-path dataset. Use in Excel/Power BI for filtering by VM, region, current SKU, recommended SKU, wave, cost delta and validation notes. |
-| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data, including `ReleaseCommunicationContext` status and results (also present when Stream C is disabled). Use when another script, dashboard or pipeline needs the report facts without scraping HTML. |
+| `sku_modernization_report.csv` | CSA/Engineer, FinOps | Flat per-VM retirement-path dataset, including CPU-vendor decision fields. Use in Excel/Power BI for filtering by VM, region, current SKU, recommended SKU, wave, cost delta and validation notes. |
+| `sku_modernization_report.json` | Automation, audit, downstream tooling | Full structured report data with top-level `ReportVersion`, recommendation `Items` (including CPU-vendor decision fields), sidecar previews and `ReleaseCommunicationContext` status/results. Use when another script, dashboard or pipeline needs report data without scraping HTML. |
 | `migration_backlog_items.csv` | PM, delivery lead | Work-item/backlog-friendly extract for remediation planning. Import into Azure DevOps, Planner, Jira or a spreadsheet to track owner, wave, target SKU and execution status. |
 | `advisor_hints.json` | CSA/Engineer, troubleshooting | Raw Advisor-related hints captured during analysis. Use to verify why a row was treated as Advisor-confirmed or to reconcile with Azure Advisor/Workbook views. |
 | `api_calls_log.csv` | Operations, audit | Tabular API-call trace with provider, request metadata and success/failure state. Use for quick filtering and evidence collection. |
@@ -611,6 +651,12 @@ Recommended consumption pattern:
 - **Resource Graph paging via SkipToken.** All ARG queries (VM inventory, Advisor retirement signals,
   Dependency Agent presence) page through the `SkipToken` cursor instead of the numeric `-Skip`, which
   on large tenants is unreliable/capped and can truncate results.
+- **Memory-bounded Compute SKU retrieval.** The ARM Resource SKUs catalog is queried one requested region
+  at a time and each page is compacted immediately. If extended-location metadata exhausts available
+  memory, the script retries the same region-scoped query without that optional metadata.
+- **Nested progress for long stages.** Long-running inventory, catalog, pricing and source operations show
+  child progress under the main phase, including the current region, subscription or API page. A page number
+  identifies the current paginated API response; it is not a count of Azure resources.
 - **Prices/commitment cache only if complete.** The Retail prices cache and the RI/SP signals cache are
   saved **only** if the download completed across all requested regions. If a cursor aborts midway, the
   partial map is never persisted (avoids understating coverage on subsequent runs); a `WARN` is logged.

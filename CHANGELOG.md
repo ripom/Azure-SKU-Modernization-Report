@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.8 - 2026-07-14
+
+- Added runtime release metadata: the JSON report exposes top-level `ReportVersion`, the HTML provenance
+  sidebar identifies report version `v0.8`, and the activity log records the version at startup.
+- Added nested progress reporting to long-running inventory, source, SKU catalog and pricing stages, with
+  region/subscription/page context beneath the main execution phase.
+- Made Compute SKU REST retrieval memory-bounded by querying requested regions independently and compacting
+  each page immediately; an out-of-memory response with extended-location metadata now retries without that
+  optional metadata.
+- Fixed legacy `Standard_B1s` recommendations: when no equivalent modern shape exists, the burstable fallback
+  can select the smallest compatible 2-vCPU modern B-series target while preserving memory, architecture,
+  capability, regional/subscription restriction and configured retail-cost gates.
+- Added CPU-vendor-aware candidate ranking. Intel/AMD continuity is preferred; a mixed-vendor x64 target is
+  selected only when no same-vendor alternative exists or its known Retail price is lower, and that reason is
+  surfaced in structured output and the report. ARM is a hard architecture boundary and is never proposed for
+  an x64 VM, even when architecture changes are enabled.
+- Documented the CPU vendor/architecture decision matrix, behavior when Retail prices or vendor metadata are
+  unavailable, structured audit fields and the operational validation required for Intel/AMD changes.
+- Expanded the Pester 5 regression suite to 133 passing tests, including bounded `B1s` modernization,
+  CPU-vendor ranking and rationale, ARM exclusion and region-scoped Compute SKU memory behavior.
+
 ## v0.7 - 2026-07-14
 
 - Documented the exact official Microsoft Release Communications API endpoint and the complete default

@@ -679,6 +679,134 @@ Describe 'Recommendation safety' {
         $rows[0].VmName | Should -Be 'vm-missing'
     }
 
+    It 'recommends the smallest modern burstable upsize when B1s has no equivalent shape' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $target = New-TestCatalogEntry -Name 'Standard_B2ts_v2' -Family 'standardBsv2Family'
+        $target.Cap.vCPUs = '2'
+        $target.Cap.MemoryGB = '1'
+        $prices = @{
+            'Standard_B1s|eastus'     = New-TestPrice -Sku 'Standard_B1s' -Price 0.0104
+            'Standard_B2ts_v2|eastus' = New-TestPrice -Sku 'Standard_B2ts_v2' -Price 0.0110
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-b1s' -Sku 'Standard_B1s') `
+            -Catalog @($current, $target) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_B2ts_v2'
+        $row.RecommendationBasis | Should -Match 'burstable'
+    }
+
+    It 'prefers an Intel target for an Intel VM when the AMD twin is not cheaper' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $intelTarget = New-TestCatalogEntry -Name 'Standard_B2ts_v2' -Family 'standardBsv2Family'
+        $intelTarget.Cap.vCPUs = '2'
+        $intelTarget.Cap.MemoryGB = '1'
+        $amdTarget = New-TestCatalogEntry -Name 'Standard_B2ats_v2' -Family 'standardBasv2Family'
+        $amdTarget.Cap.vCPUs = '2'
+        $amdTarget.Cap.MemoryGB = '1'
+        $prices = @{
+            'Standard_B1s|eastus'      = New-TestPrice -Sku 'Standard_B1s' -Price 0.0100
+            'Standard_B2ts_v2|eastus'  = New-TestPrice -Sku 'Standard_B2ts_v2' -Price 0.0110
+            'Standard_B2ats_v2|eastus' = New-TestPrice -Sku 'Standard_B2ats_v2' -Price 0.0110
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-intel' -Sku 'Standard_B1s') `
+            -Catalog @($current, $amdTarget, $intelTarget) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_B2ts_v2'
+        $row.CurrentCpuVendor | Should -Be 'Intel'
+        $row.TargetCpuVendor | Should -Be 'Intel'
+        $row.CpuVendorChange | Should -BeFalse
+    }
+
+    It 'allows a cheaper AMD target and explains the price-driven vendor change' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $intelTarget = New-TestCatalogEntry -Name 'Standard_B2ts_v2' -Family 'standardBsv2Family'
+        $intelTarget.Cap.vCPUs = '2'
+        $intelTarget.Cap.MemoryGB = '1'
+        $amdTarget = New-TestCatalogEntry -Name 'Standard_B2ats_v2' -Family 'standardBasv2Family'
+        $amdTarget.Cap.vCPUs = '2'
+        $amdTarget.Cap.MemoryGB = '1'
+        $prices = @{
+            'Standard_B1s|eastus'      = New-TestPrice -Sku 'Standard_B1s' -Price 0.0100
+            'Standard_B2ts_v2|eastus'  = New-TestPrice -Sku 'Standard_B2ts_v2' -Price 0.0110
+            'Standard_B2ats_v2|eastus' = New-TestPrice -Sku 'Standard_B2ats_v2' -Price 0.0105
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-price' -Sku 'Standard_B1s') `
+            -Catalog @($current, $intelTarget, $amdTarget) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_B2ats_v2'
+        $row.CurrentCpuVendor | Should -Be 'Intel'
+        $row.TargetCpuVendor | Should -Be 'AMD'
+        $row.CpuVendorChange | Should -BeTrue
+        $row.CpuVendorChangeReason | Should -Be 'LowerRetailPrice'
+        $row.Recommendation | Should -Match 'Intel -> AMD.*lower retail price'
+    }
+
+    It 'allows an AMD target when no compatible Intel alternative exists' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $amdTarget = New-TestCatalogEntry -Name 'Standard_B2ats_v2' -Family 'standardBasv2Family'
+        $amdTarget.Cap.vCPUs = '2'
+        $amdTarget.Cap.MemoryGB = '1'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-amd-only' -Sku 'Standard_B1s') `
+            -Catalog @($current, $amdTarget) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_B2ats_v2'
+        $row.CpuVendorChangeReason | Should -Be 'NoSameVendorAlternative'
+        $row.Recommendation | Should -Match 'no compatible same-vendor alternative'
+    }
+
+    It 'never proposes ARM for an x64 VM even when architecture changes are enabled' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $armTarget = New-TestCatalogEntry -Name 'Standard_B2ps_v2' -Family 'standardBpsv2Family'
+        $armTarget.Cap.vCPUs = '2'
+        $armTarget.Cap.MemoryGB = '1'
+        $armTarget.Cap.CpuArchitectureType = 'Arm64'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-x64' -Sku 'Standard_B1s') `
+            -Catalog @($current, $armTarget) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -AllowArchChange | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'N/A'
+    }
+
     It 'applies the configured cost ceiling to fallback candidates' {
         $catalog = @(
             New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
@@ -772,6 +900,35 @@ Describe 'Risk, cost, and delivery artifacts' {
         $facts.Rows[0].CostDeltaPercent | Should -BeNullOrEmpty
     }
 
+    It 'surfaces a price-driven CPU vendor change in the recommended SKU note' {
+        $row = [pscustomobject]@{
+            VmName                       = 'vm-vendor-change'
+            CurrentSku                   = 'Standard_B1s'
+            Region                       = 'eastus'
+            OsType                       = 'Linux'
+            CurrentPriceOsBasis          = 'Linux'
+            CurrentWindowsMeterAvailable = $false
+            EvidenceSource               = 'LiveLearnMarkdown'
+            RetirementSourceGate         = 'LiveLearnMarkdown'
+            RetirementDate               = '2028-11-15'
+            CandidateTargetSku           = 'Standard_B2ats_v2'
+            GenerationChange             = $false
+            SensitiveWorkload            = $false
+            WorkloadRole                  = 'GeneralCompute'
+            CpuVendorChange               = $true
+            CpuVendorChangeReason         = 'LowerRetailPrice'
+            CurrentCpuVendor              = 'Intel'
+            TargetCpuVendor               = 'AMD'
+            CommitmentRetirementImpact    = $false
+            CostDeltaPublishable          = $false
+            AdvisorRecommendationId       = 'N/A'
+        }
+
+        $facts = Build-ReportFacts -Rows @($row)
+
+        $facts.Rows[0].RecommendedSkuNote | Should -Match 'CPU vendor change \(Intel -> AMD\).*lower.*price'
+    }
+
     It 'builds backlog items from retirement urgency rather than generic modernization priority' {
         $path = Join-Path $TestDrive 'backlog.csv'
         $rows = @(
@@ -845,6 +1002,83 @@ Describe 'External contract defaults' {
 
         $evidence.EvidenceType | Should -Be 'UnknownSource'
         $evidence.Confidence | Should -Be 'Low'
+    }
+}
+
+Describe 'Compute SKU REST memory bounds' {
+    It 'queries each requested region separately and compacts paged VM results' {
+        $script:requestedSkuUris = New-Object 'System.Collections.Generic.List[string]'
+
+        function Get-AzContext {
+            param($ErrorAction)
+            return [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'sub-test' } }
+        }
+
+        function Get-AzAccessToken {
+            param($ResourceUrl)
+            return [pscustomobject]@{ Token = 'test-token' }
+        }
+
+        function Write-Progress {
+            param($Id, $ParentId, $Activity, $Status, $PercentComplete, [switch]$Completed)
+        }
+
+        function Invoke-RestMethod {
+            param($Uri, $Method, $Headers, $ErrorAction)
+            $script:requestedSkuUris.Add([string]$Uri) | Out-Null
+
+            $vmSku = {
+                param($Name, $Location)
+                [pscustomobject]@{
+                    name         = $Name
+                    resourceType = 'virtualMachines'
+                    family       = 'standardDSv5Family'
+                    tier         = 'Standard'
+                    size         = ($Name -replace '^Standard_', '')
+                    locations    = @($Location)
+                    capabilities = @([pscustomobject]@{ name = 'vCPUs'; value = '2' })
+                    restrictions = @()
+                    locationInfo = @()
+                    apiVersions  = @('2026-03-02')
+                }
+            }
+
+            if ($Uri -eq 'https://next.test/eastus/2') {
+                return [pscustomobject]@{
+                    value    = @(& $vmSku 'Standard_D4s_v5' 'eastus')
+                    nextLink = $null
+                }
+            }
+
+            $decodedUri = [uri]::UnescapeDataString([string]$Uri)
+            if ($decodedUri -match "location eq 'eastus'") {
+                return [pscustomobject]@{
+                    value = @(
+                        (& $vmSku 'Standard_D2s_v5' 'eastus'),
+                        [pscustomobject]@{ name = 'Standard_LRS'; resourceType = 'disks'; locations = @('eastus') }
+                    )
+                    nextLink = 'https://next.test/eastus/2'
+                }
+            }
+            if ($decodedUri -match "location eq 'westeurope'") {
+                return [pscustomobject]@{
+                    value    = @(& $vmSku 'Standard_D2s_v5' 'westeurope')
+                    nextLink = $null
+                }
+            }
+
+            throw "Unexpected URI: $Uri"
+        }
+
+        $actual = @(Get-ComputeSkuCatalogFromRest -SubscriptionId 'sub-test' -RegionsFilter @('eastus', 'westeurope') -IncludeExtendedLocations:$true)
+        $firstPageUris = @($script:requestedSkuUris | Where-Object { $_ -ne 'https://next.test/eastus/2' })
+
+        $actual.Count | Should -Be 3
+        @($actual | Where-Object { $_.Locations -contains 'eastus' }).Count | Should -Be 2
+        @($actual | Where-Object { $_.Locations -contains 'westeurope' }).Count | Should -Be 1
+        $firstPageUris.Count | Should -Be 2
+        ([uri]::UnescapeDataString($firstPageUris[0])) | Should -Match "`\$filter=location eq 'eastus'"
+        ([uri]::UnescapeDataString($firstPageUris[1])) | Should -Match "`\$filter=location eq 'westeurope'"
     }
 }
 

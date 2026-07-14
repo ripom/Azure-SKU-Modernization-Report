@@ -149,6 +149,7 @@ $ErrorActionPreference = "Stop"
 [int]$script:RiskCriticalDays = 365
 [int]$script:RiskHighDays = 730
 $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
+[string]$script:ReportVersion = '0.8'
 $script:RetailLastPageCount = 0
 $script:RetailLastDownloadComplete = $true
 $script:CommitmentLastDownloadComplete = $true
@@ -926,14 +927,17 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
     )
 
     $filterTargets = New-Object 'System.Collections.Generic.List[object]'
+    $targetIndex = 0
     foreach ($k in $kinds) {
         if ($normalizedRegions.Count -gt 0) {
             foreach ($region in $normalizedRegions) {
-                $filterTargets.Add([pscustomobject]@{ Region = $region; Kind = $k.Kind; Optional = $k.Optional; Filter = "serviceName eq 'Virtual Machines' and priceType eq '$($k.PriceType)' and armRegionName eq '$region'" }) | Out-Null
+                $targetIndex++
+                $filterTargets.Add([pscustomobject]@{ Region = $region; Kind = $k.Kind; Optional = $k.Optional; Filter = "serviceName eq 'Virtual Machines' and priceType eq '$($k.PriceType)' and armRegionName eq '$region'"; ProgressId = (240 + $targetIndex) }) | Out-Null
             }
         }
         else {
-            $filterTargets.Add([pscustomobject]@{ Region = '*'; Kind = $k.Kind; Optional = $k.Optional; Filter = "serviceName eq 'Virtual Machines' and priceType eq '$($k.PriceType)'" }) | Out-Null
+            $targetIndex++
+            $filterTargets.Add([pscustomobject]@{ Region = '*'; Kind = $k.Kind; Optional = $k.Optional; Filter = "serviceName eq 'Virtual Machines' and priceType eq '$($k.PriceType)'"; ProgressId = (240 + $targetIndex) }) | Out-Null
         }
     }
 
@@ -950,6 +954,7 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
         $errText = $null
         $statusCode = 0
         while ($nextUrl) {
+            Write-Progress -Id ([int]$Target.ProgressId) -ParentId 24 -Activity "Commitment $($Target.Kind): $($Target.Region)" -Status "Downloading page $($pages + 1)" -PercentComplete -1
             $attempt = 0
             $maxAttempts = [math]::Max(1, $MaxRetries + 1)
             $page = $null
@@ -980,6 +985,7 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
             foreach ($it in @($page.Items)) { $items.Add($it) | Out-Null }
             $nextUrl = if ($page -and $page.PSObject.Properties.Match("NextPageLink").Count -gt 0 -and $page.NextPageLink) { [string]$page.NextPageLink } else { $null }
         }
+        Write-Progress -Id ([int]$Target.ProgressId) -ParentId 24 -Activity "Commitment $($Target.Kind): $($Target.Region)" -Status "Completed - pages: $pages" -Completed
         [pscustomobject]@{ Region = [string]$Target.Region; Kind = [string]$Target.Kind; Optional = [bool]$Target.Optional; Items = $items.ToArray(); Pages = $pages; Complete = $complete; Error = $errText; StatusCode = $statusCode }
     }
 
@@ -1000,7 +1006,11 @@ function Get-RetailCommitmentSignalsForVirtualMachines {
 
     $map = @{}
     $overallComplete = $true
+    $completedTargets = 0
     foreach ($tr in @($targetResults)) {
+        $completedTargets++
+        $targetPct = if ($filterTargets.Count -gt 0) { [int][math]::Round(($completedTargets / $filterTargets.Count) * 100, 0) } else { 100 }
+        Write-Progress -Id 24 -ParentId 1 -Activity "Retail commitment signals" -Status "Processing filter $completedTargets/$($filterTargets.Count): $($tr.Region)" -PercentComplete $targetPct
         $regionOk = [bool]$tr.Complete
         if (-not $regionOk) {
             if ($tr.Optional -and $tr.StatusCode -eq 400) {
@@ -1252,81 +1262,69 @@ function Get-ComputeSkuCatalogFromRest {
     }
 
     $headers = @{ Authorization = "Bearer $tokenValue" }
-    $base = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Compute/skus?api-version=$ApiVersion"
-    if ($IncludeExtendedLocations) {
-        $base = "$base&includeExtendedLocations=true"
-    }
+    $normalizedRegions = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
+    $queryTargets = if ($normalizedRegions.Count -gt 0) { $normalizedRegions } else { @('*') }
+    $catalog = New-Object 'System.Collections.Generic.List[object]'
+    $targetIndex = 0
 
-    $url = $base
-    $all = New-Object 'System.Collections.Generic.List[object]'
-    $page = 0
-
-    while ($url) {
-        $page++
-        $restStart = Get-Date
-        try {
-            $resp = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
-            Add-ApiCallLog -Api "Invoke-RestMethod" -Provider "AzureComputeResourceSkus" -TenantId $script:EffectiveTenantId -SubscriptionId $SubscriptionId -Request $url -StartedAt $restStart -EndedAt (Get-Date) -Success $true -Meta @{ Page = $page; Items = @($resp.value).Count }
+    foreach ($targetRegion in $queryTargets) {
+        $targetIndex++
+        $base = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Compute/skus?api-version=$ApiVersion"
+        if ($targetRegion -ne '*') {
+            $encodedFilter = [uri]::EscapeDataString("location eq '$targetRegion'")
+            $base = "$base&`$filter=$encodedFilter"
         }
-        catch {
-            Add-ApiCallLog -Api "Invoke-RestMethod" -Provider "AzureComputeResourceSkus" -TenantId $script:EffectiveTenantId -SubscriptionId $SubscriptionId -Request $url -StartedAt $restStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message -Meta @{ Page = $page }
-            throw
+        if ($IncludeExtendedLocations) {
+            $base = "$base&includeExtendedLocations=true"
         }
 
-        if ($resp -and $resp.value) {
-            foreach ($item in @($resp.value)) {
-                $all.Add($item)
+        $url = $base
+        $page = 0
+        while ($url) {
+            $page++
+            $targetPct = [int][math]::Round((($targetIndex - 1) / $queryTargets.Count) * 100, 0)
+            Write-Progress -Id 12 -ParentId 1 -Activity "Compute SKU catalog (REST)" -Status "Region $targetIndex/$($queryTargets.Count) ($targetRegion), page $page; retained $($catalog.Count)" -PercentComplete $targetPct
+            $restStart = Get-Date
+            try {
+                $resp = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
+                Add-ApiCallLog -Api "Invoke-RestMethod" -Provider "AzureComputeResourceSkus" -TenantId $script:EffectiveTenantId -SubscriptionId $SubscriptionId -Request $url -StartedAt $restStart -EndedAt (Get-Date) -Success $true -Meta @{ Region = $targetRegion; Page = $page; Items = @($resp.value).Count }
             }
-        }
-
-        $url = if ($resp -and $resp.PSObject.Properties.Match("nextLink").Count -gt 0 -and $resp.nextLink) { [string]$resp.nextLink } else { $null }
-    }
-
-    $allArr = $all.ToArray()
-    $totalSkus = @($allArr).Count
-    $idx = 0
-    $catalog = foreach ($sku in $allArr) {
-        if ([string]$sku.resourceType -ne "virtualMachines") { continue }
-
-        $idx++
-        $pct = if ($totalSkus -gt 0) { [int][math]::Round(($idx / $totalSkus) * 100, 0) } else { 100 }
-        Write-Progress -Id 12 -ParentId 1 -Activity "Compute SKU catalog (REST)" -Status "Analyzing SKU $idx/$totalSkus" -PercentComplete $pct
-
-        $locations = @($sku.locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) })
-        if ($RegionsFilter -and $RegionsFilter.Count -gt 0) {
-            $normalizedRegions = $RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation $_ }
-            if (-not ($locations | Where-Object { $_ -in $normalizedRegions })) {
-                continue
+            catch {
+                Add-ApiCallLog -Api "Invoke-RestMethod" -Provider "AzureComputeResourceSkus" -TenantId $script:EffectiveTenantId -SubscriptionId $SubscriptionId -Request $url -StartedAt $restStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message -Meta @{ Region = $targetRegion; Page = $page }
+                throw
             }
-        }
 
-        $cap = @{}
-        foreach ($c in @($sku.capabilities)) {
-            $cap[[string]$c.name] = [string]$c.value
-        }
+            foreach ($sku in @($resp.value)) {
+                if ([string]$sku.resourceType -ne "virtualMachines") { continue }
 
-        $familyVal = if ($sku.PSObject.Properties.Match("family").Count -gt 0) { [string]$sku.family } else { "" }
-        $tierVal = if ($sku.PSObject.Properties.Match("tier").Count -gt 0) { [string]$sku.tier } else { "" }
-        $sizeVal = if ($sku.PSObject.Properties.Match("size").Count -gt 0) { [string]$sku.size } else { "" }
-        $restrictionsVal = if ($sku.PSObject.Properties.Match("restrictions").Count -gt 0) { $sku.restrictions } else { @() }
-        $locationInfoVal = if ($sku.PSObject.Properties.Match("locationInfo").Count -gt 0) { $sku.locationInfo } else { @() }
-        $apiVersionsVal = if ($sku.PSObject.Properties.Match("apiVersions").Count -gt 0) { $sku.apiVersions } else { @() }
+                $locations = @($sku.locations | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ })
+                if ($targetRegion -ne '*' -and $targetRegion -notin $locations) { continue }
 
-        [pscustomobject]@{
-            Name         = [string]$sku.name
-            Family       = $familyVal
-            Tier         = $tierVal
-            Size         = $sizeVal
-            Locations    = $locations
-            Cap          = $cap
-            Restrictions = $restrictionsVal
-            LocationInfo = $locationInfoVal
-            ApiVersions  = $apiVersionsVal
+                $cap = @{}
+                foreach ($c in @($sku.capabilities)) {
+                    $cap[[string]$c.name] = [string]$c.value
+                }
+
+                $catalog.Add([pscustomobject]@{
+                    Name         = [string]$sku.name
+                    Family       = if ($sku.PSObject.Properties.Match("family").Count -gt 0) { [string]$sku.family } else { "" }
+                    Tier         = if ($sku.PSObject.Properties.Match("tier").Count -gt 0) { [string]$sku.tier } else { "" }
+                    Size         = if ($sku.PSObject.Properties.Match("size").Count -gt 0) { [string]$sku.size } else { "" }
+                    Locations    = $locations
+                    Cap          = $cap
+                    Restrictions = if ($sku.PSObject.Properties.Match("restrictions").Count -gt 0) { $sku.restrictions } else { @() }
+                    LocationInfo = if ($sku.PSObject.Properties.Match("locationInfo").Count -gt 0) { $sku.locationInfo } else { @() }
+                    ApiVersions  = if ($sku.PSObject.Properties.Match("apiVersions").Count -gt 0) { $sku.apiVersions } else { @() }
+                }) | Out-Null
+            }
+
+            $url = if ($resp -and $resp.PSObject.Properties.Match("nextLink").Count -gt 0 -and $resp.nextLink) { [string]$resp.nextLink } else { $null }
+            $resp = $null
         }
     }
 
     Write-Progress -Id 12 -ParentId 1 -Activity "Compute SKU catalog (REST)" -Status "Completed" -Completed
-    return $catalog
+    return $catalog.ToArray()
 }
 
 function Get-VersionFromVmSize {
@@ -1477,10 +1475,17 @@ Resources
 
     $inventory = New-Object 'System.Collections.Generic.List[object]'
     $batchAccounts = New-Object 'System.Collections.Generic.List[object]'
+    $totalSubs = @($subList).Count
+    $subIdx = 0
     foreach ($subId in $subList) {
+        $subIdx++
         $pageSize = 1000
         $skipToken = $null
+        $pageNumber = 0
         do {
+            $pageNumber++
+            $subPct = if ($totalSubs -gt 0) { [int][math]::Round((($subIdx - 1) / $totalSubs) * 100, 0) } else { 0 }
+            Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status "Pools: subscription $subIdx/$totalSubs, page $pageNumber" -PercentComplete $subPct
             $graphArgs = @{
                 Query        = $query
                 First        = $pageSize
@@ -1525,7 +1530,10 @@ Resources
         } while ($skipToken)
 
         $skipToken = $null
+        $pageNumber = 0
         do {
+            $pageNumber++
+            Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status "Accounts: subscription $subIdx/$totalSubs, page $pageNumber" -PercentComplete $subPct
             $accountGraphArgs = @{
                 Query        = $accountQuery
                 First        = $pageSize
@@ -1559,6 +1567,7 @@ Resources
     }
 
     if ($batchAccounts.Count -eq 0) {
+        Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status "Completed - pools: $($inventory.Count)" -Completed
         Write-Log 'Batch pool public preview: no Batch accounts found in subscription scope.'
         return $inventory.ToArray()
     }
@@ -1584,6 +1593,7 @@ Resources
     }
     catch {
         Add-ApiCallLog -Api 'Get-AzAccessToken' -Provider 'Az.Accounts' -TenantId $script:EffectiveTenantId -SubscriptionId 'N/A' -Request 'ResourceUrl=https://management.azure.com/;BatchPoolsPublicPreview' -StartedAt $tokenStart -EndedAt (Get-Date) -Success $false -ErrorMessage $_.Exception.Message
+        Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status 'REST fallback skipped' -Completed
         Write-Log "Batch pool public preview REST fallback skipped: unable to acquire ARM token. $($_.Exception.Message)" 'WARN'
         return $inventory.ToArray()
     }
@@ -1596,12 +1606,19 @@ Resources
         }
     }
 
-    foreach ($account in @($batchAccounts.ToArray())) {
+    $accountItems = @($batchAccounts.ToArray())
+    $accountIndex = 0
+    foreach ($account in $accountItems) {
+        $accountIndex++
         if ([string]::IsNullOrWhiteSpace([string]$account.SubscriptionId) -or [string]::IsNullOrWhiteSpace([string]$account.ResourceGroup) -or [string]::IsNullOrWhiteSpace([string]$account.AccountName)) { continue }
         $encodedResourceGroup = [uri]::EscapeDataString([string]$account.ResourceGroup)
         $encodedAccountName = [uri]::EscapeDataString([string]$account.AccountName)
         $url = "https://management.azure.com/subscriptions/$($account.SubscriptionId)/resourceGroups/$encodedResourceGroup/providers/Microsoft.Batch/batchAccounts/$encodedAccountName/pools?api-version=$BatchApiVersion"
+        $pageNumber = 0
         while ($url) {
+            $pageNumber++
+            $accountPct = if ($accountItems.Count -gt 0) { [int][math]::Round((($accountIndex - 1) / $accountItems.Count) * 100, 0) } else { 0 }
+            Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status "REST account $accountIndex/$($accountItems.Count), page $pageNumber ($($account.AccountName))" -PercentComplete $accountPct
             $poolRestStart = Get-Date
             try {
                 $resp = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
@@ -1644,6 +1661,7 @@ Resources
         }
     }
 
+    Write-Progress -Id 20 -ParentId 1 -Activity 'Batch inventory' -Status "Completed - pools: $($inventory.Count)" -Completed
     return $inventory.ToArray()
 }
 
@@ -1741,10 +1759,17 @@ Resources
     }
 
     $inventory = New-Object 'System.Collections.Generic.List[object]'
+    $totalSubs = @($subList).Count
+    $subIdx = 0
     foreach ($subId in $subList) {
+        $subIdx++
         $pageSize = 1000
         $skipToken = $null
+        $pageNumber = 0
         do {
+            $pageNumber++
+            $subPct = if ($totalSubs -gt 0) { [int][math]::Round(($subIdx / $totalSubs) * 100, 0) } else { 100 }
+            Write-Progress -Id 21 -ParentId 1 -Activity 'VM Scale Set inventory' -Status "Subscription $subIdx/$totalSubs, page $pageNumber" -PercentComplete $subPct
             $graphArgs = @{
                 Query        = $query
                 First        = $pageSize
@@ -1785,6 +1810,7 @@ Resources
         } while ($skipToken)
     }
 
+    Write-Progress -Id 21 -ParentId 1 -Activity 'VM Scale Set inventory' -Status "Completed - scale sets: $($inventory.Count)" -Completed
     return $inventory.ToArray()
 }
 
@@ -2527,6 +2553,14 @@ function Get-ComputeSkuCatalog {
                 $statusCode = "N/A"
             }
 
+            if ($_.Exception.Message -match 'OutOfMemoryException|out of memory') {
+                if ($IncludeExtendedLocations) {
+                    Write-Log "Resource SKUs REST API exhausted memory while including extended locations; retrying the region-scoped REST query without extended-location metadata." "WARN"
+                    return Get-ComputeSkuCatalogFromRest -SubscriptionId $SubscriptionIdForRest -RegionsFilter $RegionsFilter -ApiVersion $ApiVersion -IncludeExtendedLocations:$false
+                }
+                throw
+            }
+
             Write-Log "Resource SKUs REST API failed (subscription=$SubscriptionIdForRest, status=$statusCode); falling back to Get-AzComputeResourceSku. Error: $($_.Exception.Message)" "WARN"
             if ($statusCode -eq 401) {
                 Write-Log "HTTP 401 on Resource SKUs REST API: verify RBAC on subscription $SubscriptionIdForRest and token tenant alignment." "WARN"
@@ -2607,18 +2641,23 @@ function Get-RetailPricesForVirtualMachines {
     }
 
     $filterTargets = New-Object 'System.Collections.Generic.List[object]'
+    $targetIndex = 0
     if ($normalizedRegions.Count -gt 0) {
         foreach ($region in $normalizedRegions) {
+            $targetIndex++
             $filterTargets.Add([pscustomobject]@{
-                Region = $region
-                Filter = "serviceName eq 'Virtual Machines' and priceType eq 'Consumption' and armRegionName eq '$region'"
+                Region     = $region
+                Filter     = "serviceName eq 'Virtual Machines' and priceType eq 'Consumption' and armRegionName eq '$region'"
+                ProgressId = 130 + $targetIndex
             }) | Out-Null
         }
     }
     else {
+        $targetIndex++
         $filterTargets.Add([pscustomobject]@{
-            Region = '*'
-            Filter = "serviceName eq 'Virtual Machines' and priceType eq 'Consumption'"
+            Region     = '*'
+            Filter     = "serviceName eq 'Virtual Machines' and priceType eq 'Consumption'"
+            ProgressId = 130 + $targetIndex
         }) | Out-Null
     }
 
@@ -2642,6 +2681,7 @@ function Get-RetailPricesForVirtualMachines {
         $complete = $true
         $errText = $null
         while ($nextUrl) {
+            Write-Progress -Id ([int]$Target.ProgressId) -ParentId 13 -Activity "Retail prices: $($Target.Region)" -Status "Downloading page $($pages + 1)" -PercentComplete -1
             $attempt = 0
             $maxAttempts = [math]::Max(1, $MaxRetries + 1)
             $page = $null
@@ -2671,6 +2711,7 @@ function Get-RetailPricesForVirtualMachines {
             foreach ($it in @($page.Items)) { $items.Add($it) | Out-Null }
             $nextUrl = if ($page -and $page.PSObject.Properties.Match("NextPageLink").Count -gt 0 -and $page.NextPageLink) { [string]$page.NextPageLink } else { $null }
         }
+        Write-Progress -Id ([int]$Target.ProgressId) -ParentId 13 -Activity "Retail prices: $($Target.Region)" -Status "Completed - pages: $pages" -Completed
         [pscustomobject]@{ Region = [string]$Target.Region; Items = $items.ToArray(); Pages = $pages; Complete = $complete; Error = $errText }
     }
 
@@ -2695,8 +2736,12 @@ function Get-RetailPricesForVirtualMachines {
     $failedRequests = 0
     $totalPages = 0
     $overallComplete = $true
+    $completedRegions = 0
 
     foreach ($rr in @($regionResults)) {
+        $completedRegions++
+        $regionPct = if ($filterTargets.Count -gt 0) { [int][math]::Round(($completedRegions / $filterTargets.Count) * 100, 0) } else { 100 }
+        Write-Progress -Id 13 -ParentId 1 -Activity "Retail Prices API" -Status "Processing region $completedRegions/$($filterTargets.Count): $($rr.Region)" -PercentComplete $regionPct
         $totalPages += [int]$rr.Pages
         $regionOk = [bool]$rr.Complete
         if (-not $regionOk) {
@@ -3181,10 +3226,17 @@ AdvisorResources
     $upgradeOnlyCount = 0
     $sourceComplete = $true
 
+    $totalSubs = @($subList).Count
+    $subIdx = 0
     foreach ($subId in $subList) {
+        $subIdx++
         $pageSize = 1000
         $skipToken = $null
+        $pageNumber = 0
         do {
+            $pageNumber++
+            $subPct = if ($totalSubs -gt 0) { [int][math]::Round(($subIdx / $totalSubs) * 100, 0) } else { 100 }
+            Write-Progress -Id 23 -ParentId 1 -Activity 'Advisor retirement signals' -Status "Subscription $subIdx/$totalSubs, page $pageNumber" -PercentComplete $subPct
             $graphArgs = @{
                 Query        = $query
                 First        = $pageSize
@@ -3288,6 +3340,7 @@ AdvisorResources
         Write-Log ("Advisor Service Upgrade and Retirement: {0} upgrade-only signal(s) (no retirement date) captured separately and NOT counted on the retirement path." -f $upgradeOnlyCount) "INFO"
     }
 
+    Write-Progress -Id 23 -ParentId 1 -Activity 'Advisor retirement signals' -Status "Completed - recommendations: $($byVmResourceId.Count)" -Completed
     if (-not $sourceComplete) {
         throw "Live retirement source (Advisor ARG) incomplete; at least one subscription fetch failed."
     }
@@ -3723,6 +3776,31 @@ function Get-Architecture {
     return "Unknown"
 }
 
+function Get-CpuVendor {
+    param(
+        [Parameter(Mandatory = $true)][string]$SkuName,
+        [Parameter(Mandatory = $true)][hashtable]$Cap
+    )
+
+    $architecture = Get-Architecture -Cap $Cap
+    if ($architecture -eq 'Arm64') { return 'ARM' }
+
+    foreach ($capabilityName in @('CpuManufacturer', 'CpuVendor', 'ProcessorManufacturer')) {
+        if (-not $Cap.ContainsKey($capabilityName)) { continue }
+        $capabilityValue = [string]$Cap[$capabilityName]
+        if ($capabilityValue -match '(?i)AMD|EPYC') { return 'AMD' }
+        if ($capabilityValue -match '(?i)Intel|Xeon') { return 'Intel' }
+        if ($capabilityValue -match '(?i)ARM|Ampere') { return 'ARM' }
+    }
+
+    if ($architecture -ne 'x64') { return 'Unknown' }
+    $normalizedName = ConvertTo-NormalizedSkuName $SkuName
+    $nameMatch = [regex]::Match($normalizedName, '^standard_[a-z]+\d+(?<variant>[a-z]*)(?:_v\d+)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($nameMatch.Success -and $nameMatch.Groups['variant'].Value -match '(?i)a') { return 'AMD' }
+    if ($nameMatch.Success) { return 'Intel' }
+    return 'Unknown'
+}
+
 function Get-PerformanceModelResult {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Cap,
@@ -3922,6 +4000,7 @@ function Test-CandidateTechnicalCompatibility {
         [Parameter(Mandatory = $true)][double]$CurrentMemGb,
         [Parameter(Mandatory = $false)][double]$VcpuTolerancePercent = 15,
         [Parameter(Mandatory = $false)][double]$MemoryTolerancePercent = 20,
+        [Parameter(Mandatory = $false)][switch]$AllowComputeUpsize,
         [Parameter(Mandatory = $false)][switch]$IgnoreNicRegression
     )
 
@@ -3950,11 +4029,11 @@ function Test-CandidateTechnicalCompatibility {
 
     $vcpuTolRatio = [math]::Max(0.0, [double]$VcpuTolerancePercent / 100.0)
     $memTolRatio = [math]::Max(0.0, [double]$MemoryTolerancePercent / 100.0)
-    if ($CurrentVcpu -gt 0) {
+    if ($CurrentVcpu -gt 0 -and -not $AllowComputeUpsize) {
         $vcpuDiffRatio = [math]::Abs(($candVcpu - $CurrentVcpu) / $CurrentVcpu)
         if ($vcpuDiffRatio -gt $vcpuTolRatio) { return $false }
     }
-    if ($CurrentMemGb -gt 0) {
+    if ($CurrentMemGb -gt 0 -and -not $AllowComputeUpsize) {
         $memDiffRatio = [math]::Abs(($candMem - $CurrentMemGb) / $CurrentMemGb)
         if ($memDiffRatio -gt $memTolRatio) { return $false }
     }
@@ -4247,6 +4326,7 @@ function Get-CatalogOptimizationContext {
             Restrictions = $c.Restrictions
             LocationInfo = if ($c.PSObject.Properties.Match("LocationInfo").Count -gt 0) { $c.LocationInfo } else { $null }
             Arch         = Get-Architecture -Cap $c.Cap
+            CpuVendor    = Get-CpuVendor -SkuName ([string]$c.Name) -Cap $c.Cap
             Version      = Get-VersionFromVmSize -VmSize ([string]$c.Name)
             FeatureScore = Get-ModernFeatureScore -Cap $c.Cap
             PerfIndex    = [double]$perfRes.Index
@@ -4368,6 +4448,7 @@ function Build-Recommendations {
             Restrictions = $c.Restrictions
             LocationInfo = if ($c.PSObject.Properties.Match("LocationInfo").Count -gt 0) { $c.LocationInfo } else { $null }
             Arch         = Get-Architecture -Cap $c.Cap
+            CpuVendor    = Get-CpuVendor -SkuName ([string]$c.Name) -Cap $c.Cap
             Version      = Get-VersionFromVmSize -VmSize ([string]$c.Name)
             FeatureScore = Get-ModernFeatureScore -Cap $c.Cap
             PerfIndex    = [double]$perfRes.Index
@@ -4428,6 +4509,10 @@ function Build-Recommendations {
                 Region                 = $vm.Location
                 CurrentSku             = $vm.VmSize
                 CurrentArch            = 'Unknown'
+                CurrentCpuVendor       = 'Unknown'
+                TargetCpuVendor        = 'Unknown'
+                CpuVendorChange        = $false
+                CpuVendorChangeReason  = 'N/A'
                 OsType                 = $vmOsType
                 CurrentPriceOsBasis    = $currentPriceOsBasis
                 CurrentWindowsMeterAvailable = [bool]$currentWindowsMeterAvailable
@@ -4495,6 +4580,7 @@ function Build-Recommendations {
 
         $currentVersion = [int]$currSku.Version
         $currentArch = [string]$currSku.Arch
+        $currentCpuVendor = [string]$currSku.CpuVendor
 
         $workloadRole = Get-WorkloadRole -VmName ([string]$vm.VmName) -TagsText ([string]$vm.TagsText) -ExtensionsText ([string]$vm.ExtensionsText)
 
@@ -4571,13 +4657,18 @@ function Build-Recommendations {
 
         $currentIsBurstable = Test-IsBurstableSku -SkuName ([string]$vm.VmSize)
         if (@($candidatePool).Count -eq 0 -and $currentIsBurstable) {
+            $burstableMaxVcpu = if ($currentVcpu -eq 1) { [math]::Max(2, $maxVcpu) } else { $maxVcpu }
             $burstablePool = @($allCatalogEntries | Where-Object {
+                $candidateVcpu = Get-CapNumber -Cap $_.Cap -Name "vCPUs" -Default 0
+                $candidateMemGb = Get-CapNumber -Cap $_.Cap -Name "MemoryGB" -Default 0
                 $_.Name -ne $vm.VmSize -and
                 (Test-IsBurstableSku -SkuName ([string]$_.Name)) -and
                 $_.Version -gt $currentVersion -and
                 ($_.Locations -contains $vm.Location) -and
                 ($AllowArchChange -or $_.Arch -eq $currentArch) -and
-                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -IgnoreNicRegression)
+                ($currentVcpu -le 0 -or ($candidateVcpu -ge $currentVcpu -and $candidateVcpu -le $burstableMaxVcpu)) -and
+                ($currentMemGb -le 0 -or ($candidateMemGb -ge $currentMemGb -and $candidateMemGb -le $maxMem)) -and
+                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -AllowComputeUpsize -IgnoreNicRegression)
             })
 
             if (@($burstablePool).Count -gt 0) {
@@ -4609,6 +4700,8 @@ function Build-Recommendations {
 
         $candidatePool = @($candidatePool | Where-Object {
             $scopeOk = Test-CandidateAllowedForScope -Candidate $_ -Location ([string]$vm.Location) -SubscriptionId ([string]$vm.SubscriptionId)
+            $crossesArmBoundary = (($currentArch -eq 'Arm64') -xor ($_.Arch -eq 'Arm64'))
+            $architectureOk = (-not $crossesArmBoundary -and ($AllowArchChange -or $_.Arch -eq $currentArch))
             $costOk = $true
             if ($currentPrice -gt 0) {
                 $candKey = "{0}|{1}" -f $_.Name, $vm.Location
@@ -4621,11 +4714,11 @@ function Build-Recommendations {
                 }
             }
 
-            ($scopeOk -and $costOk)
+            ($scopeOk -and $architectureOk -and $costOk)
         })
 
         $orderedCandidates = New-Object 'System.Collections.Generic.List[object]'
-        $candidateRanked = foreach ($cand in $candidatePool) {
+        $candidateRanked = @(foreach ($cand in $candidatePool) {
             $candKey = "{0}|{1}" -f $cand.Name, $vm.Location
             $candPrice = 0.0
             $hasPrice = $false
@@ -4664,10 +4757,34 @@ function Build-Recommendations {
                 CostDeltaPctCandidate = $costDeltaPctCandidate
                 Cand = $cand
                 CandPrice = $candPrice
+                HasPrice = $hasPrice
+                CpuVendor = [string]$cand.CpuVendor
+                VendorRank = 0
+                VendorChangeReason = 'N/A'
+            }
+        })
+
+        $knownCurrentVendor = ($currentCpuVendor -in @('Intel', 'AMD'))
+        $sameVendorRanked = if ($knownCurrentVendor) { @($candidateRanked | Where-Object { $_.CpuVendor -eq $currentCpuVendor }) } else { @() }
+        $sameVendorPrices = @($sameVendorRanked | Where-Object { $_.HasPrice } | ForEach-Object { [double]$_.CandPrice })
+        $lowestSameVendorPrice = if ($sameVendorPrices.Count -gt 0) { [double](($sameVendorPrices | Measure-Object -Minimum).Minimum) } else { $null }
+        foreach ($rankedCandidate in $candidateRanked) {
+            if (-not $knownCurrentVendor -or $rankedCandidate.CpuVendor -notin @('Intel', 'AMD') -or $rankedCandidate.CpuVendor -eq $currentCpuVendor) { continue }
+
+            if ($sameVendorRanked.Count -eq 0) {
+                $rankedCandidate.VendorChangeReason = 'NoSameVendorAlternative'
+            }
+            elseif ($rankedCandidate.HasPrice -and $null -ne $lowestSameVendorPrice -and [double]$rankedCandidate.CandPrice -lt $lowestSameVendorPrice) {
+                $rankedCandidate.VendorRank = -1
+                $rankedCandidate.VendorChangeReason = 'LowerRetailPrice'
+            }
+            else {
+                $rankedCandidate.VendorRank = 1
+                $rankedCandidate.VendorChangeReason = 'SameVendorPreferred'
             }
         }
 
-        foreach ($ranked in ($candidateRanked | Sort-Object Score, CostDeltaPctCandidate, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { $_.Cand.FeatureScore }; Descending = $true } | Select-Object -First $Top)) {
+        foreach ($ranked in ($candidateRanked | Sort-Object VendorRank, Score, CostDeltaPctCandidate, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { $_.Cand.FeatureScore }; Descending = $true } | Select-Object -First $Top)) {
             $cand = $ranked.Cand
             $candPrice = [double]$ranked.CandPrice
 
@@ -4678,6 +4795,8 @@ function Build-Recommendations {
                 Perf      = [double]$cand.PerfIndex
                 PerfModel = if ($cand.PSObject.Properties.Match("PerfModel").Count -gt 0) { [string]$cand.PerfModel } else { "Unknown*" }
                 Arch      = [string]$cand.Arch
+                CpuVendor = [string]$cand.CpuVendor
+                VendorChangeReason = [string]$ranked.VendorChangeReason
                 Feature   = [double]$cand.FeatureScore
                 Cap       = $cand.Cap
                 Restrictions = $cand.Restrictions
@@ -4688,6 +4807,9 @@ function Build-Recommendations {
         $orderedCandidatesArr = $orderedCandidates.ToArray()
         $bestCandidate = @($orderedCandidatesArr | Select-Object -First 1)
         if (@($bestCandidate).Count -gt 0) { $bestCandidate = $bestCandidate[0] } else { $bestCandidate = $null }
+        $targetCpuVendor = if ($bestCandidate) { [string]$bestCandidate.CpuVendor } else { 'Unknown' }
+        $cpuVendorChange = [bool]($bestCandidate -and $currentCpuVendor -in @('Intel', 'AMD') -and $targetCpuVendor -in @('Intel', 'AMD') -and $currentCpuVendor -ne $targetCpuVendor)
+        $cpuVendorChangeReason = if ($cpuVendorChange) { [string]$bestCandidate.VendorChangeReason } else { 'N/A' }
         $latestVersion = $currentVersion
         if (@($candidateSkus).Count -gt 0) {
             $latestVersion = [int](($candidateSkus | Measure-Object -Property Version -Maximum).Maximum)
@@ -4809,6 +4931,15 @@ function Build-Recommendations {
         $recommendationText = "No equivalent alternative found in family; keep and monitor roadmap"
         if ($bestCandidate) {
             $impactNotes = New-Object 'System.Collections.Generic.List[string]'
+
+            if ($cpuVendorChange) {
+                if ($cpuVendorChangeReason -eq 'LowerRetailPrice') {
+                    $impactNotes.Add("CPU vendor change: $currentCpuVendor -> $targetCpuVendor selected for lower retail price than the compatible $currentCpuVendor alternative")
+                }
+                else {
+                    $impactNotes.Add("CPU vendor change: $currentCpuVendor -> $targetCpuVendor because no compatible same-vendor alternative was available")
+                }
+            }
 
             $currentHyperV = Get-CapString -Cap $currSku.Cap -Name "HyperVGenerations" -Default "N/A"
             $targetHyperV = Get-CapString -Cap $bestCandidate.Cap -Name "HyperVGenerations" -Default "N/A"
@@ -5006,6 +5137,10 @@ function Build-Recommendations {
             Region                 = $vm.Location
             CurrentSku             = $vm.VmSize
             CurrentArch            = $currentArch
+            CurrentCpuVendor       = $currentCpuVendor
+            TargetCpuVendor        = $targetCpuVendor
+            CpuVendorChange        = $cpuVendorChange
+            CpuVendorChangeReason  = $cpuVendorChangeReason
             OsType                 = $vmOsType
             CurrentPriceOsBasis    = $currentPriceOsBasis
             CurrentWindowsMeterAvailable = [bool]$currentWindowsMeterAvailable
@@ -5223,9 +5358,16 @@ function Confirm-MonitoringAgentPresence {
                 $ctx = Get-AzContext -ErrorAction SilentlyContinue
                 if ($ctx -and $ctx.Subscription) { $subList = @([string]$ctx.Subscription.Id) }
             }
+            $totalSubs = $subList.Count
+            $subIdx = 0
             foreach ($subId in $subList) {
+                $subIdx++
                 $skipToken = $null
+                $pageNumber = 0
                 do {
+                    $pageNumber++
+                    $subPct = if ($totalSubs -gt 0) { [int][math]::Round(($subIdx / $totalSubs) * 100, 0) } else { 100 }
+                    Write-Progress -Id 22 -ParentId 1 -Activity 'Dependency Agent verification' -Status "Subscription $subIdx/$totalSubs, page $pageNumber" -PercentComplete $subPct
                     $graphArgs = @{ Query = $query; First = 1000; Subscription = [string]$subId }
                     if ($skipToken) { $graphArgs["SkipToken"] = $skipToken }
                     $searchStart = Get-Date
@@ -5250,6 +5392,7 @@ function Confirm-MonitoringAgentPresence {
         $agentVmIds = $null
     }
 
+    Write-Progress -Id 22 -ParentId 1 -Activity 'Dependency Agent verification' -Status "Completed - rows: $($rows.Count)" -Completed
     foreach ($row in $rows) {
         $vmId = if ($row.PSObject.Properties.Match("ResourceId").Count -gt 0 -and $row.ResourceId) { ([string]$row.ResourceId).ToLowerInvariant() } else { "" }
         $state = if ($null -eq $agentVmIds) { "Unknown" }
@@ -5516,6 +5659,19 @@ function Build-ReportFacts {
             if ($generationChange) {
                 $noteParts.Add('Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1->Gen2 conversion) and validate boot, drivers and extensions before migrating.') | Out-Null
             }
+            $cpuVendorChange = ($row.PSObject.Properties.Match('CpuVendorChange').Count -gt 0 -and [bool]$row.CpuVendorChange)
+            if ($cpuVendorChange) {
+                $currentCpuVendor = if ($row.PSObject.Properties.Match('CurrentCpuVendor').Count -gt 0) { [string]$row.CurrentCpuVendor } else { 'Unknown' }
+                $targetCpuVendor = if ($row.PSObject.Properties.Match('TargetCpuVendor').Count -gt 0) { [string]$row.TargetCpuVendor } else { 'Unknown' }
+                $cpuVendorReason = if ($row.PSObject.Properties.Match('CpuVendorChangeReason').Count -gt 0) { [string]$row.CpuVendorChangeReason } else { 'N/A' }
+                $vendorNote = if ($cpuVendorReason -eq 'LowerRetailPrice') {
+                    "CPU vendor change ($currentCpuVendor -> $targetCpuVendor): selected for lower retail price than the compatible same-vendor alternative; validate vendor-sensitive licensing and performance assumptions."
+                }
+                else {
+                    "CPU vendor change ($currentCpuVendor -> $targetCpuVendor): no compatible same-vendor alternative was available; validate vendor-sensitive licensing and performance assumptions."
+                }
+                $noteParts.Add($vendorNote) | Out-Null
+            }
             if ($sensitiveWorkload) {
                 $noteParts.Add("Sensitive workload$(if ($workloadRoleVal -and $workloadRoleVal -ne 'GeneralCompute') { " ($workloadRoleVal)" } else { '' }): change is delicate - validate carefully and test in a non-production window before migrating.") | Out-Null
             }
@@ -5574,6 +5730,7 @@ function Build-ReportFacts {
     $monitoringDistinctVmCount = @($monitoringRows | Select-Object -ExpandProperty ResourceId -Unique).Count
 
     return [pscustomobject]@{
+        ReportVersion      = $script:ReportVersion
         GeneratedAtUtc     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
         TotalVmCount       = @($Rows).Count
         RetireCount        = $retirementRows.Count
@@ -6519,6 +6676,7 @@ function ConvertTo-SimplifiedReportHtml {
 "@
 
     $generatedUtc = if ($Provenance -and $Provenance.PSObject.Properties.Match('GeneratedUtc').Count -gt 0) { [string]$Provenance.GeneratedUtc } else { [string]$Facts.GeneratedAtUtc }
+    $reportVersion = if ($Facts.PSObject.Properties.Match('ReportVersion').Count -gt 0) { [string]$Facts.ReportVersion } else { 'N/A' }
     $tenantCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('TenantCount').Count -gt 0) { [string]$Provenance.TenantCount } else { '' }
     $subscriptionCount = if ($Provenance -and $Provenance.PSObject.Properties.Match('SubscriptionCount').Count -gt 0) { [string]$Provenance.SubscriptionCount } else { '' }
     $liveSources = if ($Provenance -and $Provenance.PSObject.Properties.Match('LiveSources').Count -gt 0) { [string]$Provenance.LiveSources } else { '' }
@@ -7136,6 +7294,7 @@ ul { margin-top: 8px; }
 <label for="view-coverage">Coverage <span>Evidence</span></label>
 </nav>
 <div class="side-item"><span>Generated (UTC)</span><strong>$(ConvertTo-HtmlText $generatedUtc)</strong></div>
+<div class="side-item"><span>Report version</span><strong>v$(ConvertTo-HtmlText $reportVersion)</strong></div>
 <div class="side-item"><span>Live sources</span><strong>$(ConvertTo-HtmlText $liveSources)</strong></div>
 <div class="side-item"><span>Release Communications API</span><strong>$(ConvertTo-HtmlText $releaseCommunicationStatusText)</strong></div>
 <div class="side-item"><span>Tenants / subscriptions</span><strong>$(ConvertTo-HtmlText $tenantCount) / $(ConvertTo-HtmlText $subscriptionCount)</strong></div>
@@ -7657,7 +7816,10 @@ function Invoke-ArgQuery {
     )
     $all = @()
     $skipToken = $null
+    $pageNumber = 0
     do {
+        $pageNumber++
+        Write-Progress -Id 25 -ParentId 1 -Activity 'Advisor Resource Graph query' -Status "Downloading page $pageNumber" -PercentComplete -1
         $splat = @{ Query = $Query; First = 1000 }
         if ($Subs)        { $splat.Subscription = $Subs }
         elseif ($UseTenantScope) { $splat.UseTenantScope = $true }
@@ -7667,6 +7829,7 @@ function Invoke-ArgQuery {
         if ($resp) { $all += $resp }
         $skipToken = $resp.SkipToken
     } while ($skipToken)
+    Write-Progress -Id 25 -ParentId 1 -Activity 'Advisor Resource Graph query' -Status "Completed - rows: $($all.Count)" -Completed
     return @($all)
 }
 
@@ -7688,7 +7851,7 @@ try {
     $runHeader = "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))][INFO] Run log initialized at '$($script:RunLogPath)'"
     Set-Content -LiteralPath $script:RunLogPath -Value $runHeader -Encoding UTF8
 
-    Write-Log "Starting Azure SKU Modernization Analyst (MVP)"
+    Write-Log "Starting Azure SKU Modernization Analyst v$script:ReportVersion"
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Initializing modules"
 
@@ -7936,6 +8099,7 @@ try {
         Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
     [pscustomobject]@{
+        ReportVersion    = $script:ReportVersion
         Items            = $results
         BatchPoolPreview = $batchPoolPreview
         VmssPreview      = $vmssPreview
