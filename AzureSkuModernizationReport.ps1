@@ -149,7 +149,7 @@ $ErrorActionPreference = "Stop"
 [int]$script:RiskCriticalDays = 365
 [int]$script:RiskHighDays = 730
 $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
-[string]$script:ReportVersion = '0.8'
+[string]$script:ReportVersion = '0.9'
 $script:RetailLastPageCount = 0
 $script:RetailLastDownloadComplete = $true
 $script:CommitmentLastDownloadComplete = $true
@@ -769,6 +769,58 @@ function Get-ComputeSkuCatalogCached {
     }
 
     return $catalogFresh
+}
+
+function Get-ComputeSkuCatalogsBySubscription {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$SubscriptionIds,
+        [Parameter(Mandatory = $true)][object[]]$Inventory,
+        [Parameter(Mandatory = $false)][string[]]$RegionsFilter,
+        [Parameter(Mandatory = $false)][bool]$UseRestApi = $true,
+        [Parameter(Mandatory = $false)][string]$ApiVersion = "2026-03-02",
+        [Parameter(Mandatory = $false)][bool]$IncludeExtendedLocations = $true,
+        [Parameter(Mandatory = $true)][string]$CacheDir,
+        [Parameter(Mandatory = $true)][bool]$UseCache,
+        [Parameter(Mandatory = $true)][int]$TtlHours,
+        [Parameter(Mandatory = $true)][bool]$ForceRefresh,
+        [Parameter(Mandatory = $false)][string]$TenantId
+    )
+
+    $catalogs = @{}
+    $allowedRegions = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
+    foreach ($subscriptionId in @($SubscriptionIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+        $subscriptionRegions = @($Inventory |
+            Where-Object { [string]$_.SubscriptionId -eq [string]$subscriptionId } |
+            ForEach-Object { ConvertTo-NormalizedLocation ([string]$_.Location) } |
+            Where-Object { $_ -and ($allowedRegions.Count -eq 0 -or $_ -in $allowedRegions) } |
+            Sort-Object -Unique)
+
+        if ($subscriptionRegions.Count -eq 0) {
+            Write-Log "SKU catalog skipped for subscription ${subscriptionId}: no inventory regions are in the requested region scope." "WARN"
+            $catalogs[[string]$subscriptionId] = @()
+            continue
+        }
+
+        try {
+            $catalogs[[string]$subscriptionId] = @(Get-ComputeSkuCatalogCached `
+                -RegionsFilter $subscriptionRegions `
+                -SubscriptionIdForRest ([string]$subscriptionId) `
+                -UseRestApi $UseRestApi `
+                -ApiVersion $ApiVersion `
+                -IncludeExtendedLocations:$IncludeExtendedLocations `
+                -CacheDir $CacheDir `
+                -UseCache $UseCache `
+                -TtlHours $TtlHours `
+                -ForceRefresh $ForceRefresh `
+                -TenantId $TenantId)
+        }
+        catch {
+            Write-Log "SKU catalog unavailable for subscription ${subscriptionId}; its VM recommendations require manual review. $($_.Exception.Message)" "WARN"
+            $catalogs[[string]$subscriptionId] = @()
+        }
+    }
+
+    return $catalogs
 }
 
 function Get-RetailPricesForVirtualMachinesCached {
@@ -2568,6 +2620,15 @@ function Get-ComputeSkuCatalog {
         }
     }
 
+    if ($SubscriptionIdForRest) {
+        $currentContext = Get-AzContext -ErrorAction SilentlyContinue
+        $currentSubscriptionId = if ($currentContext -and $currentContext.Subscription) { [string]$currentContext.Subscription.Id } else { '' }
+        if ($currentSubscriptionId -ne $SubscriptionIdForRest) {
+            Set-AzContext -SubscriptionId $SubscriptionIdForRest -ErrorAction Stop | Out-Null
+            Write-Log "Compute SKU cmdlet context switched to subscription $SubscriptionIdForRest"
+        }
+    }
+
     $startedAt = Get-Date
     try {
         $all = Get-AzComputeResourceSku | Where-Object { $_.ResourceType -eq "virtualMachines" }
@@ -3087,11 +3148,11 @@ function Convert-SkuToSeriesKey {
     
     # Mapping table: normalized SKU pattern -> Learn series key
     $mapping = @{
-        "^standard_ds\d+[a-z-]*_v2$"      = "Dsv2-series"
-        "^standard_d\d+[a-z-]*_v2$"       = "Dv2-series"
-        "^standard_fs\d+[a-z-]*_v2$"      = "Fsv2-series"
-        "^standard_f\d+[a-z-]*_v2$"       = "Fsv2-series"
-        "^standard_l\d+[a-z-]*_v2$"       = "Lsv2-series"
+        "^standard_ds\d+(?:-\d+)?[a-z]*_v2$" = "Dsv2-series"
+        "^standard_d\d+(?:-\d+)?[a-z]*_v2$"  = "Dv2-series"
+        "^standard_fs\d+(?:-\d+)?[a-z]*_v2$" = "Fsv2-series"
+        "^standard_f\d+(?:-\d+)?[a-z]*_v2$"  = "Fsv2-series"
+        "^standard_l\d+(?:-\d+)?[a-z]*_v2$"  = "Lsv2-series"
         "^standard_nv\d+[a-z-]*_v3$"      = "NVv3-series"
         "^standard_np\d+[a-z-]*$"         = "NP-series"
         "^standard_nc\d+[a-z-]*_v3$"      = "NCv3-Series"
@@ -3801,6 +3862,27 @@ function Get-CpuVendor {
     return 'Unknown'
 }
 
+function Get-EffectiveVcpuCount {
+    param(
+        [Parameter(Mandatory = $true)]$Cap,
+        [Parameter(Mandatory = $false)][double]$Default = 0
+    )
+
+    $availableVcpu = Get-CapNumber -Cap $Cap -Name "vCPUsAvailable" -Default 0
+    if ($availableVcpu -gt 0) { return $availableVcpu }
+    return (Get-CapNumber -Cap $Cap -Name "vCPUs" -Default $Default)
+}
+
+function Get-SkuWorkloadClass {
+    param([Parameter(Mandatory = $false)][string]$SkuName = '')
+
+    $normalizedName = ConvertTo-NormalizedSkuName $SkuName
+    if ($normalizedName -match '^standard_n') { return 'GpuAccelerated' }
+    if ($normalizedName -match '^standard_h') { return 'Hpc' }
+    if ($normalizedName -match '^standard_(dc|ec)') { return 'Confidential' }
+    return 'GeneralPurpose'
+}
+
 function Get-PerformanceModelResult {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Cap,
@@ -3808,7 +3890,7 @@ function Get-PerformanceModelResult {
         [Parameter(Mandatory = $false)][bool]$PreferAcu = $true
     )
 
-    $vcpu = Get-CapNumber -Cap $Cap -Name "vCPUs" -Default 0
+    $vcpu = Get-EffectiveVcpuCount -Cap $Cap
     $mem = Get-CapNumber -Cap $Cap -Name "MemoryGB" -Default 0
     $acu = Get-CapNumber -Cap $Cap -Name "ACUs" -Default 0
     $cachedIops = Get-CapNumber -Cap $Cap -Name "CombinedTempDiskAndCachedIOPS" -Default 0
@@ -3867,6 +3949,29 @@ function Get-PerformanceModelResult {
         Index  = $indexFallback
         Method = "GenAwareHeuristic_v2*"
     }
+}
+
+function Test-CandidateMeetsPerformanceFloor {
+    param(
+        [Parameter(Mandatory = $true)]$Current,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $false)][double]$MinimumRatio = 0.95
+    )
+
+    $currentIndex = [double]$Current.PerfIndex
+    $candidateIndex = [double]$Candidate.PerfIndex
+    $currentModel = if ($Current.PSObject.Properties.Match('PerfModel').Count -gt 0) { [string]$Current.PerfModel } else { '' }
+    $candidateModel = if ($Candidate.PSObject.Properties.Match('PerfModel').Count -gt 0) { [string]$Candidate.PerfModel } else { '' }
+
+    if ($currentModel -ne $candidateModel) {
+        $currentComparable = Get-PerformanceModelResult -Cap $Current.Cap -VmSize ([string]$Current.Name) -PreferAcu:$false
+        $candidateComparable = Get-PerformanceModelResult -Cap $Candidate.Cap -VmSize ([string]$Candidate.Name) -PreferAcu:$false
+        $currentIndex = [double]$currentComparable.Index
+        $candidateIndex = [double]$candidateComparable.Index
+    }
+
+    if ($currentIndex -le 0) { return $true }
+    return ($candidateIndex -ge ($currentIndex * [math]::Max(0.1, $MinimumRatio)))
 }
 
 function Get-ModernFeatureScore {
@@ -3992,10 +4097,169 @@ function Get-CommitmentSupportForSkuRegion {
     }
 }
 
+function Test-HasLocalTemporaryStorage {
+    param(
+        [Parameter(Mandatory = $true)]$Cap,
+        [Parameter(Mandatory = $false)][string]$SkuName = ''
+    )
+
+    foreach ($capabilityName in @(
+        'MaxResourceVolumeMB',
+        'ResourceDiskSizeGB',
+        'CachedDiskBytes',
+        'NvmeDiskSizeInMiB',
+        'NvmeSizePerDiskInMiB',
+        'LocalStorageSizeInGiB'
+    )) {
+        if ((Get-CapNumber -Cap $Cap -Name $capabilityName -Default 0) -gt 0) {
+            return $true
+        }
+    }
+
+    $placements = Get-CapString -Cap $Cap -Name 'SupportedEphemeralOSDiskPlacements' -Default ''
+    if ($placements -match '(?i)(ResourceDisk|CacheDisk|NvmeDisk)') {
+        return $true
+    }
+
+    $normalizedName = ConvertTo-NormalizedSkuName $SkuName
+    $nameMatch = [regex]::Match($normalizedName, '^standard_[a-z]+\d+(?<variant>[a-z]*)(?:_v\d+)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    return ($nameMatch.Success -and $nameMatch.Groups['variant'].Value -match '(?i)d')
+}
+
+function Get-LocalTemporaryStorageKind {
+    param(
+        [Parameter(Mandatory = $true)]$Cap,
+        [Parameter(Mandatory = $false)][string]$SkuName = ''
+    )
+
+    $hasNvme = ((Get-CapNumber -Cap $Cap -Name 'NvmeDiskSizeInMiB' -Default 0) -gt 0) -or
+        ((Get-CapNumber -Cap $Cap -Name 'NvmeSizePerDiskInMiB' -Default 0) -gt 0)
+    if ($hasNvme) { return 'Local NVMe' }
+    if (Test-HasLocalTemporaryStorage -Cap $Cap -SkuName $SkuName) { return 'Resource/cache disk' }
+    return 'None'
+}
+
+function Get-CandidateEquivalenceResult {
+    param(
+        [Parameter(Mandatory = $true)]$CurrentCap,
+        [Parameter(Mandatory = $true)]$CandidateCap,
+        [Parameter(Mandatory = $false)][string]$CurrentSkuName = '',
+        [Parameter(Mandatory = $false)][string]$CandidateSkuName = ''
+    )
+
+    $differences = New-Object 'System.Collections.Generic.List[string]'
+    $comparisons = @(
+        [pscustomobject]@{ Label = 'vCPU available'; Current = Get-EffectiveVcpuCount -Cap $CurrentCap; Candidate = Get-EffectiveVcpuCount -Cap $CandidateCap }
+        [pscustomobject]@{ Label = 'memory GB'; Current = Get-CapNumber -Cap $CurrentCap -Name 'MemoryGB' -Default 0; Candidate = Get-CapNumber -Cap $CandidateCap -Name 'MemoryGB' -Default 0 }
+        [pscustomobject]@{ Label = 'maximum data disks'; Current = Get-CapNumber -Cap $CurrentCap -Name 'MaxDataDiskCount' -Default 0; Candidate = Get-CapNumber -Cap $CandidateCap -Name 'MaxDataDiskCount' -Default 0 }
+        [pscustomobject]@{ Label = 'maximum NICs'; Current = Get-CapNumber -Cap $CurrentCap -Name 'MaxNetworkInterfaces' -Default 0; Candidate = Get-CapNumber -Cap $CandidateCap -Name 'MaxNetworkInterfaces' -Default 0 }
+        [pscustomobject]@{ Label = 'Premium IO'; Current = Get-CapBool -Cap $CurrentCap -Name 'PremiumIO'; Candidate = Get-CapBool -Cap $CandidateCap -Name 'PremiumIO' }
+        [pscustomobject]@{ Label = 'Ultra SSD'; Current = Get-CapBool -Cap $CurrentCap -Name 'UltraSSDAvailable'; Candidate = Get-CapBool -Cap $CandidateCap -Name 'UltraSSDAvailable' }
+        [pscustomobject]@{ Label = 'Accelerated Networking'; Current = Get-CapBool -Cap $CurrentCap -Name 'AcceleratedNetworkingEnabled'; Candidate = Get-CapBool -Cap $CandidateCap -Name 'AcceleratedNetworkingEnabled' }
+    )
+
+    foreach ($comparison in $comparisons) {
+        if ($comparison.Current -ne $comparison.Candidate) {
+            $differences.Add("$($comparison.Label): $($comparison.Current) -> $($comparison.Candidate)")
+        }
+    }
+
+    $currentWorkloadProfile = Get-SkuCommercialWorkloadProfile -SkuName $CurrentSkuName
+    $candidateWorkloadProfile = Get-SkuCommercialWorkloadProfile -SkuName $CandidateSkuName
+    if ($currentWorkloadProfile -ne 'Unknown' -and $candidateWorkloadProfile -ne 'Unknown' -and $currentWorkloadProfile -ne $candidateWorkloadProfile) {
+        $differences.Add("workload profile: $currentWorkloadProfile -> $candidateWorkloadProfile")
+    }
+
+    $currentCpuVendor = Get-CpuVendor -SkuName $CurrentSkuName -Cap $CurrentCap
+    $candidateCpuVendor = Get-CpuVendor -SkuName $CandidateSkuName -Cap $CandidateCap
+    if ($currentCpuVendor -in @('Intel', 'AMD') -and $candidateCpuVendor -in @('Intel', 'AMD') -and $currentCpuVendor -ne $candidateCpuVendor) {
+        $differences.Add("CPU vendor: $currentCpuVendor -> $candidateCpuVendor")
+    }
+
+    $currentLocalStorage = Get-LocalTemporaryStorageKind -Cap $CurrentCap -SkuName $CurrentSkuName
+    $candidateLocalStorage = Get-LocalTemporaryStorageKind -Cap $CandidateCap -SkuName $CandidateSkuName
+    if ($currentLocalStorage -ne $candidateLocalStorage) {
+        $differences.Add("temporary/local storage: $currentLocalStorage -> $candidateLocalStorage")
+    }
+
+    $isEquivalent = ($differences.Count -eq 0)
+    return [pscustomobject]@{
+        IsEquivalent = $isEquivalent
+        Status       = if ($isEquivalent) { 'Equivalent' } else { 'NotEquivalent' }
+        Differences  = $differences.ToArray()
+        Summary      = if ($isEquivalent) { '100% match on compared SKU capabilities' } else { $differences.ToArray() -join '; ' }
+    }
+}
+
+function Get-CandidateSelectionReason {
+    param(
+        [Parameter(Mandatory = $false)][string]$CandidateStrategy = '',
+        [Parameter(Mandatory = $false)][string]$CurrentSkuName = '',
+        [Parameter(Mandatory = $false)][string]$CandidateSkuName = ''
+    )
+
+    $currentFamily = Get-SkuFamilyToken $CurrentSkuName
+    $candidateFamily = Get-SkuFamilyToken $CandidateSkuName
+    switch ($CandidateStrategy) {
+        'same-family' { return "Same commercial family $currentFamily; lowest Retail price among candidates that passed the hard gates." }
+        'same-shape-newer-version' { return 'Same vCPU/RAM shape on a newer generation; lowest Retail price among equally close candidates.' }
+        'burstable-modernization' { return 'Burstable continuity with the nearest vCPU/RAM profile; lowest Retail price among equally close candidates.' }
+        'family-affinity' { return "Basic-family affinity $currentFamily -> $candidateFamily; preferred workload model first, then nearest vCPU/RAM profile and lowest Retail price." }
+        'nearby-family-compatible' { return "Cross-family $currentFamily -> $candidateFamily; nearest vCPU/RAM profile, then lowest Retail price among equally close candidates." }
+        'retirement-governed-fallback' { return "Retirement fallback $currentFamily -> $candidateFamily; nearest non-retiring vCPU/RAM profile, then lowest Retail price among equally close candidates." }
+        'no-compatible-candidate' { return 'No candidate passed the hard safety gates.' }
+        default { return 'Candidate selection reason unavailable.' }
+    }
+}
+
+function Get-CandidateCapabilityWarnings {
+    param(
+        [Parameter(Mandatory = $true)]$CurrentCap,
+        [Parameter(Mandatory = $true)]$CandidateCap,
+        [Parameter(Mandatory = $false)][string]$CurrentSkuName = '',
+        [Parameter(Mandatory = $false)][string]$CandidateSkuName = ''
+    )
+
+    $warnings = New-Object 'System.Collections.Generic.List[string]'
+    $equivalence = Get-CandidateEquivalenceResult -CurrentCap $CurrentCap -CandidateCap $CandidateCap -CurrentSkuName $CurrentSkuName -CandidateSkuName $CandidateSkuName
+    if (-not $equivalence.IsEquivalent) {
+        $warnings.Add("Warning check: target is not 100% capability-equivalent: $($equivalence.Summary)")
+    }
+    $currentHasLocalStorage = Test-HasLocalTemporaryStorage -Cap $CurrentCap -SkuName $CurrentSkuName
+    $candidateHasLocalStorage = Test-HasLocalTemporaryStorage -Cap $CandidateCap -SkuName $CandidateSkuName
+    $currentHasNvme = ((Get-CapNumber -Cap $CurrentCap -Name 'NvmeDiskSizeInMiB' -Default 0) -gt 0) -or
+        ((Get-CapNumber -Cap $CurrentCap -Name 'NvmeSizePerDiskInMiB' -Default 0) -gt 0)
+    $candidateHasNvme = ((Get-CapNumber -Cap $CandidateCap -Name 'NvmeDiskSizeInMiB' -Default 0) -gt 0) -or
+        ((Get-CapNumber -Cap $CandidateCap -Name 'NvmeSizePerDiskInMiB' -Default 0) -gt 0)
+
+    if ($currentHasLocalStorage -and -not $candidateHasLocalStorage) {
+        $warnings.Add('Warning check: target has no temporary/local disk; verify the workload does not depend on resource disk, cache disk or local NVMe')
+    }
+    elseif ($currentHasLocalStorage -and $candidateHasLocalStorage -and $currentHasNvme -ne $candidateHasNvme) {
+        $warnings.Add('Warning check: temporary storage type changes between resource/cache disk and local NVMe; validate caching, drive mapping and data lifecycle')
+    }
+
+    $currentMaxDisks = Get-CapNumber -Cap $CurrentCap -Name 'MaxDataDiskCount' -Default 0
+    $candidateMaxDisks = Get-CapNumber -Cap $CandidateCap -Name 'MaxDataDiskCount' -Default 0
+    if ($currentMaxDisks -gt 0 -and $candidateMaxDisks -lt $currentMaxDisks) {
+        $warnings.Add("Warning check: maximum data disks decrease from $currentMaxDisks to $candidateMaxDisks; verify actual attached-disk count")
+    }
+
+    $currentMaxNics = Get-CapNumber -Cap $CurrentCap -Name 'MaxNetworkInterfaces' -Default 0
+    $candidateMaxNics = Get-CapNumber -Cap $CandidateCap -Name 'MaxNetworkInterfaces' -Default 0
+    if ($currentMaxNics -gt 0 -and $candidateMaxNics -lt $currentMaxNics) {
+        $warnings.Add("Warning check: maximum NICs decrease from $currentMaxNics to $candidateMaxNics; verify actual attached-NIC count")
+    }
+
+    return $warnings.ToArray()
+}
+
 function Test-CandidateTechnicalCompatibility {
     param(
         [Parameter(Mandatory = $true)]$CurrentCap,
         [Parameter(Mandatory = $true)]$CandidateCap,
+        [Parameter(Mandatory = $false)][string]$CurrentSkuName = '',
+        [Parameter(Mandatory = $false)][string]$CandidateSkuName = '',
         [Parameter(Mandatory = $true)][double]$CurrentVcpu,
         [Parameter(Mandatory = $true)][double]$CurrentMemGb,
         [Parameter(Mandatory = $false)][double]$VcpuTolerancePercent = 15,
@@ -4024,8 +4288,10 @@ function Test-CandidateTechnicalCompatibility {
         }
     }
 
-    $candVcpu = Get-CapNumber -Cap $candCapHash -Name "vCPUs" -Default 0
+    $candVcpu = Get-EffectiveVcpuCount -Cap $candCapHash
     $candMem = Get-CapNumber -Cap $candCapHash -Name "MemoryGB" -Default 0
+
+    if ((Get-SkuWorkloadClass -SkuName $CurrentSkuName) -ne (Get-SkuWorkloadClass -SkuName $CandidateSkuName)) { return $false }
 
     $vcpuTolRatio = [math]::Max(0.0, [double]$VcpuTolerancePercent / 100.0)
     $memTolRatio = [math]::Max(0.0, [double]$MemoryTolerancePercent / 100.0)
@@ -4038,18 +4304,8 @@ function Test-CandidateTechnicalCompatibility {
         if ($memDiffRatio -gt $memTolRatio) { return $false }
     }
 
-    $currMaxDisks = Get-CapNumber -Cap $currCapHash -Name "MaxDataDiskCount" -Default 0
-    $candMaxDisks = Get-CapNumber -Cap $candCapHash -Name "MaxDataDiskCount" -Default 0
-    if ($currMaxDisks -gt 0 -and $candMaxDisks -lt $currMaxDisks) { return $false }
-
     if ((Get-CapBool -Cap $currCapHash -Name "PremiumIO") -and (-not (Get-CapBool -Cap $candCapHash -Name "PremiumIO"))) { return $false }
     if ((Get-CapBool -Cap $currCapHash -Name "UltraSSDAvailable") -and (-not (Get-CapBool -Cap $candCapHash -Name "UltraSSDAvailable"))) { return $false }
-
-    $currMaxNics = Get-CapNumber -Cap $currCapHash -Name "MaxNetworkInterfaces" -Default 0
-    $candMaxNics = Get-CapNumber -Cap $candCapHash -Name "MaxNetworkInterfaces" -Default 0
-    if (-not $IgnoreNicRegression) {
-        if ($currMaxNics -gt 0 -and $candMaxNics -lt $currMaxNics) { return $false }
-    }
 
     if ((Get-CapBool -Cap $currCapHash -Name "AcceleratedNetworkingEnabled") -and (-not (Get-CapBool -Cap $candCapHash -Name "AcceleratedNetworkingEnabled"))) { return $false }
 
@@ -4235,7 +4491,10 @@ function Get-RecommendationBasis {
         "same-family"              { return "Rule-based: same family / same workload model" }
         "same-shape-newer-version" { return "Same-shape refresh: same vCPU/RAM profile but newer generation" }
         "burstable-modernization"  { return "Rule-based: burstable continuity (same CPU credit model)" }
+        "family-affinity"          { return "Rule-based: preferred successor family for the current workload model" }
         "nearby-family-compatible" { return "Heuristic: cross-family migration (requires architecture validation)" }
+        "retirement-governed-fallback" { return "Retirement fallback: compatible non-retiring alternative passed hard safety gates" }
+        "no-compatible-candidate"  { return "No compatible non-retiring alternative passed hard safety gates" }
         default                    { return "Unknown / no candidate" }
     }
 }
@@ -4252,7 +4511,10 @@ function Get-HeuristicLevel {
         "same-family"              { "Low" }
         "burstable-modernization"  { "Low" }
         "same-shape-newer-version" { "Medium" }
+        "family-affinity"          { "Medium" }
         "nearby-family-compatible" { "High" }
+        "retirement-governed-fallback" { "High" }
+        "no-compatible-candidate"  { "N/A" }
         default                    { "Medium" }
     }
 
@@ -4304,7 +4566,7 @@ function Get-ObjectPropertyValue {
 }
 
 function Get-CatalogOptimizationContext {
-    param([Parameter(Mandatory = $true)][object[]]$Catalog)
+    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][object[]]$Catalog)
 
     $byName = @{}
     $byFamilyLoc = @{}
@@ -4318,6 +4580,7 @@ function Get-CatalogOptimizationContext {
         $entry = [pscustomobject]@{
             Name         = [string]$c.Name
             Family       = [string]$c.Family
+            NormalizedFamily = Get-SkuFamilyToken -Sku ([string]$c.Name)
             Tier         = [string]$c.Tier
             Size         = [string]$c.Size
             ShapeKey     = Get-SkuShapeKey -SkuName ([string]$c.Name)
@@ -4409,7 +4672,7 @@ function Get-CatalogOptimizationContext {
 function Build-Recommendations {
     param(
         [Parameter(Mandatory = $true)][object[]]$Inventory,
-        [Parameter(Mandatory = $true)][object[]]$Catalog,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][object[]]$Catalog,
         [Parameter(Mandatory = $true)][hashtable]$PriceMap,
         [Parameter(Mandatory = $false)][hashtable]$CommitmentMap,
         [Parameter(Mandatory = $true)][hashtable]$FirstSeenMap,
@@ -4427,8 +4690,6 @@ function Build-Recommendations {
 
     $catalogCtx = Get-CatalogOptimizationContext -Catalog $Catalog
     $catalogByName = $catalogCtx.ByName
-    $catalogByFamilyLoc = $catalogCtx.ByFamilyLoc
-    $catalogByFamilyLocArch = $catalogCtx.ByFamilyLocArch
     $catalogByShapeLoc = $catalogCtx.ByShapeLoc
     $catalogByShapeLocArch = $catalogCtx.ByShapeLocArch
     $allCatalogEntries = New-Object 'System.Collections.Generic.List[object]'
@@ -4440,6 +4701,7 @@ function Build-Recommendations {
         $entry = [pscustomobject]@{
             Name         = [string]$c.Name
             Family       = [string]$c.Family
+            NormalizedFamily = Get-SkuFamilyToken -Sku ([string]$c.Name)
             Tier         = [string]$c.Tier
             Size         = [string]$c.Size
             ShapeKey     = Get-SkuShapeKey -SkuName ([string]$c.Name)
@@ -4474,6 +4736,8 @@ function Build-Recommendations {
 
         $vmKey = "{0}|{1}" -f $vm.VmSize, $vm.Location
         $vmOsType = if ($vm.PSObject.Properties.Match('OsType').Count -gt 0) { [string]$vm.OsType } else { "" }
+        $retirement = Resolve-RetirementForVmOrSku -Vm $vm -Retirements $Retirements
+        $requiresRetirementAlternative = ($null -ne $retirement)
 
         $currentPrice = 0.0
         $currentPriceEffectiveStartDate = "N/A"
@@ -4497,7 +4761,6 @@ function Build-Recommendations {
 
         if (-not $currSku) {
             Write-Log "SKU not found in compute catalog: $($vm.VmSize)" "WARN"
-            $retirement = Resolve-RetirementForVmOrSku -Vm $vm -Retirements $Retirements
             $retirementEvidence = Get-RetirementEvidence -RetirementEntry $retirement
             $effectiveRetirementDate = if ($retirement) { Format-NullableDate $retirement.RetireOn } else { 'N/A' }
             $retirementRisk = Get-RetirementRisk -RetirementEntry $retirement -EvidenceType $retirementEvidence.EvidenceType -CurrentVersion 0
@@ -4524,6 +4787,9 @@ function Build-Recommendations {
                 SuggestedSkus          = ''
                 SuggestedPrimarySku    = 'N/A'
                 CandidateTargetSku     = 'N/A'
+                CandidateEquivalenceStatus = 'Unknown'
+                CandidateEquivalenceDetails = 'Current SKU missing from compute catalog.'
+                CandidateSelectionReason = 'No candidate selected because the current SKU is missing from the compute catalog.'
                 UsageDataStatus        = 'Current SKU not found in compute catalog; manual validation required.'
                 WorkloadRole           = 'Unknown'
                 WorkloadRoleSource     = 'N/A'
@@ -4581,39 +4847,35 @@ function Build-Recommendations {
         $currentVersion = [int]$currSku.Version
         $currentArch = [string]$currSku.Arch
         $currentCpuVendor = [string]$currSku.CpuVendor
+        $currentNormalizedFamily = Get-SkuFamilyToken -Sku ([string]$currSku.Name)
 
         $workloadRole = Get-WorkloadRole -VmName ([string]$vm.VmName) -TagsText ([string]$vm.TagsText) -ExtensionsText ([string]$vm.ExtensionsText)
 
-        if (-not $AllowArchChange) {
-            $famKey = "{0}|{1}|{2}" -f $currSku.Family, $vm.Location, $currentArch
-            $familySkus = if ($catalogByFamilyLocArch.ContainsKey($famKey)) { @($catalogByFamilyLocArch[$famKey]) } else { @() }
-        }
-        else {
-            $famKey = "{0}|{1}" -f $currSku.Family, $vm.Location
-            $familySkus = if ($catalogByFamilyLoc.ContainsKey($famKey)) { @($catalogByFamilyLoc[$famKey]) } else { @() }
-        }
+        $familySkus = @($allCatalogEntries | Where-Object {
+            $_.NormalizedFamily -eq $currentNormalizedFamily -and
+            ($_.Locations -contains $vm.Location) -and
+            ($AllowArchChange -or $_.Arch -eq $currentArch)
+        })
 
         $candidateSkus = @($familySkus | Where-Object {
             $_.Name -ne $vm.VmSize -and $_.Version -ge $currentVersion
         })
 
-        $currentVcpu = Get-CapNumber -Cap $currSku.Cap -Name "vCPUs" -Default 0
+        $currentVcpu = Get-EffectiveVcpuCount -Cap $currSku.Cap
         $currentMemGb = Get-CapNumber -Cap $currSku.Cap -Name "MemoryGB" -Default 0
 
         $minVcpu = if ($currentVcpu -gt 0) { $currentVcpu * 0.75 } else { 0 }
         $maxVcpu = if ($currentVcpu -gt 0) { $currentVcpu * [math]::Max(1.0, $MaxVcpuIncreaseRatio) } else { 0 }
         $minMem = if ($currentMemGb -gt 0) { $currentMemGb * 0.75 } else { 0 }
         $maxMem = if ($currentMemGb -gt 0) { $currentMemGb * [math]::Max(1.0, $MaxMemoryIncreaseRatio) } else { 0 }
-        $minPerf = if ($currSku.PerfIndex -gt 0) { [double]$currSku.PerfIndex * [math]::Max(0.1, $MinPerfRatio) } else { 0 }
-
         $candidatePool = @($candidateSkus | Where-Object {
-            $candVcpu = Get-CapNumber -Cap $_.Cap -Name "vCPUs" -Default $currentVcpu
+            $candVcpu = Get-EffectiveVcpuCount -Cap $_.Cap -Default $currentVcpu
             $candMem = Get-CapNumber -Cap $_.Cap -Name "MemoryGB" -Default $currentMemGb
 
             $sizeWithinLower = (($currentVcpu -le 0 -or $candVcpu -ge $minVcpu) -and ($currentMemGb -le 0 -or $candMem -ge $minMem))
             $sizeWithinUpper = (($currentVcpu -le 0 -or $candVcpu -le $maxVcpu) -and ($currentMemGb -le 0 -or $candMem -le $maxMem))
-            $perfOk = ($minPerf -le 0 -or [double]$_.PerfIndex -ge $minPerf)
-            $techOk = Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent
+            $perfOk = Test-CandidateMeetsPerformanceFloor -Current $currSku -Candidate $_ -MinimumRatio $MinPerfRatio
+            $techOk = Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent
 
             $costOk = $true
             if ($currentPrice -gt 0) {
@@ -4647,7 +4909,7 @@ function Build-Recommendations {
             $candidatePool = @($shapeCandidates | Where-Object {
                 $_.Name -ne $vm.VmSize -and
                 $_.Version -gt $currentVersion -and
-                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent)
+                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent)
             })
 
             if (@($candidatePool).Count -gt 0) {
@@ -4659,7 +4921,7 @@ function Build-Recommendations {
         if (@($candidatePool).Count -eq 0 -and $currentIsBurstable) {
             $burstableMaxVcpu = if ($currentVcpu -eq 1) { [math]::Max(2, $maxVcpu) } else { $maxVcpu }
             $burstablePool = @($allCatalogEntries | Where-Object {
-                $candidateVcpu = Get-CapNumber -Cap $_.Cap -Name "vCPUs" -Default 0
+                $candidateVcpu = Get-EffectiveVcpuCount -Cap $_.Cap
                 $candidateMemGb = Get-CapNumber -Cap $_.Cap -Name "MemoryGB" -Default 0
                 $_.Name -ne $vm.VmSize -and
                 (Test-IsBurstableSku -SkuName ([string]$_.Name)) -and
@@ -4668,12 +4930,54 @@ function Build-Recommendations {
                 ($AllowArchChange -or $_.Arch -eq $currentArch) -and
                 ($currentVcpu -le 0 -or ($candidateVcpu -ge $currentVcpu -and $candidateVcpu -le $burstableMaxVcpu)) -and
                 ($currentMemGb -le 0 -or ($candidateMemGb -ge $currentMemGb -and $candidateMemGb -le $maxMem)) -and
-                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -AllowComputeUpsize -IgnoreNicRegression)
+                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -AllowComputeUpsize -IgnoreNicRegression)
             })
 
             if (@($burstablePool).Count -gt 0) {
                 $candidatePool = $burstablePool
                 $candidateStrategy = "burstable-modernization"
+            }
+        }
+
+        if (@($candidatePool).Count -eq 0) {
+            $preferredSuccessorFamilies = @(Get-PreferredSuccessorFamilies -SkuName ([string]$vm.VmSize))
+            foreach ($preferredFamily in $preferredSuccessorFamilies) {
+                $affinityMaxVcpu = if ($currentVcpu -gt 0) { [math]::Max($maxVcpu, $currentVcpu * 2.0) } else { 0 }
+                $affinityMaxMemory = if ($currentMemGb -gt 0) { [math]::Max($maxMem, $currentMemGb * 2.0) } else { 0 }
+                $affinityPool = @($allCatalogEntries | Where-Object {
+                    $candidateVcpu = Get-EffectiveVcpuCount -Cap $_.Cap
+                    $candidateMemGb = Get-CapNumber -Cap $_.Cap -Name "MemoryGB" -Default 0
+                    $candidateRetirement = Resolve-RetirementForSku -SkuName ([string]$_.Name) -Retirements $Retirements
+                    $affinityCostOk = $true
+                    if ($currentPrice -gt 0) {
+                        $affinityPriceKey = "{0}|{1}" -f $_.Name, $vm.Location
+                        if ($PriceMap.ContainsKey($affinityPriceKey)) {
+                            $affinityPrice = Get-RetailUnitPriceForOs -PriceEntry $PriceMap[$affinityPriceKey] -OsType $vmOsType
+                            if ($affinityPrice -gt 0) {
+                                $affinityCostDelta = (($affinityPrice - $currentPrice) / $currentPrice) * 100
+                                $affinityCostOk = ($affinityCostDelta -le $MaxCostIncreasePercent)
+                            }
+                        }
+                    }
+                    $_.Name -ne $vm.VmSize -and
+                    $_.NormalizedFamily -eq $preferredFamily -and
+                    $_.Version -ge $currentVersion -and
+                    ($_.Locations -contains $vm.Location) -and
+                    ($AllowArchChange -or $_.Arch -eq $currentArch) -and
+                    ($currentVcpu -le 0 -or ($candidateVcpu -ge $currentVcpu -and $candidateVcpu -le $affinityMaxVcpu)) -and
+                    ($currentMemGb -le 0 -or ($candidateMemGb -ge $currentMemGb -and $candidateMemGb -le $affinityMaxMemory)) -and
+                    (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -AllowComputeUpsize) -and
+                    (Test-CandidateAllowedForScope -Candidate $_ -Location ([string]$vm.Location) -SubscriptionId ([string]$vm.SubscriptionId)) -and
+                    (Test-CandidateMeetsPerformanceFloor -Current $currSku -Candidate $_ -MinimumRatio $MinPerfRatio) -and
+                    ($null -eq $candidateRetirement) -and
+                    $affinityCostOk
+                })
+
+                if ($affinityPool.Count -gt 0) {
+                    $candidatePool = $affinityPool
+                    $candidateStrategy = 'family-affinity'
+                    break
+                }
             }
         }
 
@@ -4685,11 +4989,11 @@ function Build-Recommendations {
         if (@($candidatePool).Count -eq 0) {
             $nearbyFamilyPool = @($allCatalogEntries | Where-Object {
                 $_.Name -ne $vm.VmSize -and
-                $_.Family -ne $currSku.Family -and
+                $_.NormalizedFamily -ne $currentNormalizedFamily -and
                 $_.Version -ge $currentVersion -and
                 ($_.Locations -contains $vm.Location) -and
                 ($AllowArchChange -or $_.Arch -eq $currentArch) -and
-                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent)
+                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent)
             })
 
             if (@($nearbyFamilyPool).Count -gt 0) {
@@ -4702,6 +5006,8 @@ function Build-Recommendations {
             $scopeOk = Test-CandidateAllowedForScope -Candidate $_ -Location ([string]$vm.Location) -SubscriptionId ([string]$vm.SubscriptionId)
             $crossesArmBoundary = (($currentArch -eq 'Arm64') -xor ($_.Arch -eq 'Arm64'))
             $architectureOk = (-not $crossesArmBoundary -and ($AllowArchChange -or $_.Arch -eq $currentArch))
+            $performanceOk = Test-CandidateMeetsPerformanceFloor -Current $currSku -Candidate $_ -MinimumRatio $MinPerfRatio
+            $candidateNotRetiring = ($null -eq (Resolve-RetirementForSku -SkuName ([string]$_.Name) -Retirements $Retirements))
             $costOk = $true
             if ($currentPrice -gt 0) {
                 $candKey = "{0}|{1}" -f $_.Name, $vm.Location
@@ -4714,8 +5020,34 @@ function Build-Recommendations {
                 }
             }
 
-            ($scopeOk -and $architectureOk -and $costOk)
+            ($scopeOk -and $architectureOk -and $performanceOk -and $candidateNotRetiring -and $costOk)
         })
+
+        if (@($candidatePool).Count -eq 0 -and $requiresRetirementAlternative) {
+            $candidatePool = @($allCatalogEntries | Where-Object {
+                $candidateVcpu = Get-EffectiveVcpuCount -Cap $_.Cap
+                $candidateMemGb = Get-CapNumber -Cap $_.Cap -Name "MemoryGB" -Default 0
+                $candidateRetirement = Resolve-RetirementForSku -SkuName ([string]$_.Name) -Retirements $Retirements
+
+                $_.Name -ne $vm.VmSize -and
+                ($_.Locations -contains $vm.Location) -and
+                $_.Arch -eq $currentArch -and
+                ($currentVcpu -le 0 -or $candidateVcpu -ge $currentVcpu) -and
+                ($currentMemGb -le 0 -or $candidateMemGb -ge $currentMemGb) -and
+                ($null -eq $candidateRetirement) -and
+                (Test-CandidateAllowedForScope -Candidate $_ -Location ([string]$vm.Location) -SubscriptionId ([string]$vm.SubscriptionId)) -and
+                (Test-CandidateMeetsPerformanceFloor -Current $currSku -Candidate $_ -MinimumRatio $MinPerfRatio) -and
+                (Test-CandidateTechnicalCompatibility -CurrentCap $currSku.Cap -CandidateCap $_.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$_.Name) -CurrentVcpu $currentVcpu -CurrentMemGb $currentMemGb -VcpuTolerancePercent $EquivalentVcpuTolerancePercent -MemoryTolerancePercent $EquivalentMemoryTolerancePercent -AllowComputeUpsize)
+            })
+
+            if (@($candidatePool).Count -gt 0) {
+                $candidateStrategy = "retirement-governed-fallback"
+            }
+        }
+
+        if (@($candidatePool).Count -eq 0) {
+            $candidateStrategy = "no-compatible-candidate"
+        }
 
         $orderedCandidates = New-Object 'System.Collections.Generic.List[object]'
         $candidateRanked = @(foreach ($cand in $candidatePool) {
@@ -4729,7 +5061,7 @@ function Build-Recommendations {
                 }
             }
 
-            $candVcpu = Get-CapNumber -Cap $cand.Cap -Name "vCPUs" -Default $currentVcpu
+            $candVcpu = Get-EffectiveVcpuCount -Cap $cand.Cap -Default $currentVcpu
             $candMem = Get-CapNumber -Cap $cand.Cap -Name "MemoryGB" -Default $currentMemGb
 
             $vcpuDeltaAbs = if ($currentVcpu -gt 0) { [math]::Abs(($candVcpu - $currentVcpu) / $currentVcpu) } else { 0 }
@@ -4750,10 +5082,15 @@ function Build-Recommendations {
                 $costDeltaPctCandidate = 999
             }
 
+            $vcpuUpsizeRatio = if ($currentVcpu -gt 0) { [math]::Max(0, ($candVcpu - $currentVcpu) / $currentVcpu) } else { 0 }
+            $memoryUpsizeRatio = if ($currentMemGb -gt 0) { [math]::Max(0, ($candMem - $currentMemGb) / $currentMemGb) } else { 0 }
             $score = (($upsizePenalty * 4.0) + ($vcpuDeltaAbs * 2.5) + ($memDeltaAbs * 2.0) + ([math]::Max(0, $costDeltaPctCandidate) / 50.0)) - (($cand.Version - $currentVersion) * 0.15) - ($cand.FeatureScore / 500.0)
 
             [pscustomobject]@{
                 Score = $score
+                ShapeUpsizeRatio = $vcpuUpsizeRatio + $memoryUpsizeRatio
+                VcpuUpsizeRatio = $vcpuUpsizeRatio
+                MemoryUpsizeRatio = $memoryUpsizeRatio
                 CostDeltaPctCandidate = $costDeltaPctCandidate
                 Cand = $cand
                 CandPrice = $candPrice
@@ -4765,7 +5102,7 @@ function Build-Recommendations {
         })
 
         $knownCurrentVendor = ($currentCpuVendor -in @('Intel', 'AMD'))
-        $sameVendorRanked = if ($knownCurrentVendor) { @($candidateRanked | Where-Object { $_.CpuVendor -eq $currentCpuVendor }) } else { @() }
+        $sameVendorRanked = @(if ($knownCurrentVendor) { $candidateRanked | Where-Object { $_.CpuVendor -eq $currentCpuVendor } })
         $sameVendorPrices = @($sameVendorRanked | Where-Object { $_.HasPrice } | ForEach-Object { [double]$_.CandPrice })
         $lowestSameVendorPrice = if ($sameVendorPrices.Count -gt 0) { [double](($sameVendorPrices | Measure-Object -Minimum).Minimum) } else { $null }
         foreach ($rankedCandidate in $candidateRanked) {
@@ -4784,7 +5121,19 @@ function Build-Recommendations {
             }
         }
 
-        foreach ($ranked in ($candidateRanked | Sort-Object VendorRank, Score, CostDeltaPctCandidate, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { $_.Cand.FeatureScore }; Descending = $true } | Select-Object -First $Top)) {
+        $rankedCandidatesOrdered = switch ($candidateStrategy) {
+            'same-family' {
+                @($candidateRanked | Sort-Object CostDeltaPctCandidate, ShapeUpsizeRatio, VendorRank, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { [string]$_.Cand.Name } })
+            }
+            { $_ -in @('same-shape-newer-version', 'burstable-modernization') } {
+                @($candidateRanked | Sort-Object ShapeUpsizeRatio, CostDeltaPctCandidate, VendorRank, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { [string]$_.Cand.Name } })
+            }
+            default {
+                @($candidateRanked | Sort-Object ShapeUpsizeRatio, CostDeltaPctCandidate, VcpuUpsizeRatio, MemoryUpsizeRatio, VendorRank, @{ Expression = { $_.Cand.Version }; Descending = $true }, @{ Expression = { [string]$_.Cand.Name } })
+            }
+        }
+
+        foreach ($ranked in ($rankedCandidatesOrdered | Select-Object -First $Top)) {
             $cand = $ranked.Cand
             $candPrice = [double]$ranked.CandPrice
 
@@ -4819,7 +5168,6 @@ function Build-Recommendations {
         $currentPerfModel = if ($currSku.PSObject.Properties.Match("PerfModel").Count -gt 0 -and $currSku.PerfModel) { [string]$currSku.PerfModel } else { "Unknown*" }
         $firstSeen = if ($FirstSeenMap.ContainsKey($vmKey)) { [datetime]$FirstSeenMap[$vmKey] } else { Get-Date }
 
-        $retirement = Resolve-RetirementForVmOrSku -Vm $vm -Retirements $Retirements
         $suggestedRetirement = $null
         if ($bestCandidate) {
             $suggestedRetirement = Resolve-RetirementForSku -SkuName ([string]$bestCandidate.Name) -Retirements $Retirements
@@ -4923,12 +5271,13 @@ function Build-Recommendations {
         $riskList = @()
         if ($bestCandidate) {
             $riskList = Get-MigrationRiskList -CurrentCap $currSku.Cap -CandidateCap $bestCandidate.Cap -CurrentArch $currentArch -CandidateArch $bestCandidate.Arch
+            $riskList += @(Get-CandidateCapabilityWarnings -CurrentCap $currSku.Cap -CandidateCap $bestCandidate.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$bestCandidate.Name))
         }
         else {
             $riskList = Get-MigrationRiskList -CurrentCap $currSku.Cap -CandidateCap $currSku.Cap -CurrentArch $currentArch -CandidateArch $currentArch
         }
 
-        $recommendationText = "No equivalent alternative found in family; keep and monitor roadmap"
+        $recommendationText = "No compatible non-retiring alternative passed hard safety gates; manual architecture review required"
         if ($bestCandidate) {
             $impactNotes = New-Object 'System.Collections.Generic.List[string]'
 
@@ -5128,7 +5477,18 @@ function Build-Recommendations {
         $advisorRecName = if ($retirement -and $retirement.PSObject.Properties.Match("AdvisorRecommendationName").Count -gt 0) { [string]$retirement.AdvisorRecommendationName } else { "N/A" }
         $advisorRecTypeId = if ($retirement -and $retirement.PSObject.Properties.Match("AdvisorRecommendationTypeId").Count -gt 0) { [string]$retirement.AdvisorRecommendationTypeId } else { "N/A" }
 
-        $validationChecklist = "Gen1/Gen2 OS; NVMe support; temp/local disk; disk caching; accelerated networking; RI/Savings Plan; quota; Availability Zone"
+        $equivalenceResult = if ($bestCandidate) {
+            Get-CandidateEquivalenceResult -CurrentCap $currSku.Cap -CandidateCap $bestCandidate.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$bestCandidate.Name)
+        }
+        else {
+            [pscustomobject]@{ IsEquivalent = $false; Status = 'NoTarget'; Differences = @(); Summary = 'No compatible target selected.' }
+        }
+        $candidateSelectionReason = Get-CandidateSelectionReason -CandidateStrategy $candidateStrategy -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName $(if ($bestCandidate) { [string]$bestCandidate.Name } else { '' })
+        $capabilityWarnings = if ($bestCandidate) {
+            @(Get-CandidateCapabilityWarnings -CurrentCap $currSku.Cap -CandidateCap $bestCandidate.Cap -CurrentSkuName ([string]$currSku.Name) -CandidateSkuName ([string]$bestCandidate.Name))
+        }
+        else { @() }
+        $validationChecklist = (@("Gen1/Gen2 OS", "NVMe support", "temp/local disk", "disk caching", "accelerated networking", "RI/Savings Plan", "quota", "Availability Zone") + $capabilityWarnings) -join '; '
 
         $rows.Add([pscustomobject]@{
             SubscriptionId         = $vm.SubscriptionId
@@ -5154,6 +5514,9 @@ function Build-Recommendations {
             SuggestedSkus          = (($orderedCandidatesArr | ForEach-Object { $_.Name }) -join "; ")
             SuggestedPrimarySku    = if ($bestCandidate) { $bestCandidate.Name } else { "N/A" }
             CandidateTargetSku     = if ($bestCandidate) { $bestCandidate.Name } else { "N/A" }
+            CandidateEquivalenceStatus = [string]$equivalenceResult.Status
+            CandidateEquivalenceDetails = [string]$equivalenceResult.Summary
+            CandidateSelectionReason = $candidateSelectionReason
             UsageDataStatus        = $usageDataStatus
             WorkloadRole           = $workloadRole.Role
             WorkloadRoleSource     = ("{0} (inferred, low confidence)" -f $workloadRole.Source)
@@ -5239,6 +5602,62 @@ function Build-Recommendations {
     $timer.Stop()
 
     Write-Progress -Id 16 -ParentId 1 -Activity "Computing modernity and recommendations" -Status "Completed" -Completed
+
+    return $rows.ToArray()
+}
+
+function Build-RecommendationsBySubscription {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Inventory,
+        [Parameter(Mandatory = $true)][hashtable]$CatalogBySubscription,
+        [Parameter(Mandatory = $true)][hashtable]$PriceMap,
+        [Parameter(Mandatory = $false)][hashtable]$CommitmentMap,
+        [Parameter(Mandatory = $true)][hashtable]$FirstSeenMap,
+        [Parameter(Mandatory = $true)]$Retirements,
+        [Parameter(Mandatory = $false)][object[]]$AdvisorHints = @(),
+        [int]$Top = 3,
+        [switch]$AllowArchChange,
+        [double]$MaxVcpuIncreaseRatio = 1.5,
+        [double]$MaxMemoryIncreaseRatio = 1.5,
+        [double]$MaxCostIncreasePercent = 20,
+        [double]$MinPerfRatio = 0.95,
+        [double]$EquivalentVcpuTolerancePercent = 15,
+        [double]$EquivalentMemoryTolerancePercent = 20
+    )
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $subscriptionIds = @($Inventory |
+        ForEach-Object { [string]$_.SubscriptionId } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique)
+
+    foreach ($subscriptionId in $subscriptionIds) {
+        $subscriptionInventory = @($Inventory | Where-Object { [string]$_.SubscriptionId -eq $subscriptionId })
+        $catalog = if ($CatalogBySubscription.ContainsKey($subscriptionId)) { @($CatalogBySubscription[$subscriptionId]) } else { @() }
+        if ($catalog.Count -eq 0) {
+            Write-Log "No SKU catalog available for subscription $subscriptionId; retaining $($subscriptionInventory.Count) VM row(s) for manual review." "WARN"
+        }
+
+        $subscriptionRows = @(Build-Recommendations `
+            -Inventory $subscriptionInventory `
+            -Catalog $catalog `
+            -PriceMap $PriceMap `
+            -CommitmentMap $CommitmentMap `
+            -FirstSeenMap $FirstSeenMap `
+            -Retirements $Retirements `
+            -AdvisorHints $AdvisorHints `
+            -Top $Top `
+            -AllowArchChange:$AllowArchChange `
+            -MaxVcpuIncreaseRatio $MaxVcpuIncreaseRatio `
+            -MaxMemoryIncreaseRatio $MaxMemoryIncreaseRatio `
+            -MaxCostIncreasePercent $MaxCostIncreasePercent `
+            -MinPerfRatio $MinPerfRatio `
+            -EquivalentVcpuTolerancePercent $EquivalentVcpuTolerancePercent `
+            -EquivalentMemoryTolerancePercent $EquivalentMemoryTolerancePercent)
+        foreach ($row in $subscriptionRows) {
+            $rows.Add($row) | Out-Null
+        }
+    }
 
     return $rows.ToArray()
 }
@@ -5634,6 +6053,12 @@ function Build-ReportFacts {
         else {
             'Retail/list price delta unavailable or meter check required.'
         }
+        $equivalenceStatus = if ($row.PSObject.Properties.Match('CandidateEquivalenceStatus').Count -gt 0 -and $row.CandidateEquivalenceStatus) { [string]$row.CandidateEquivalenceStatus } else { 'Unknown' }
+        $equivalenceDetails = if ($row.PSObject.Properties.Match('CandidateEquivalenceDetails').Count -gt 0 -and $row.CandidateEquivalenceDetails) { [string]$row.CandidateEquivalenceDetails } else { 'Equivalence details unavailable.' }
+        $selectionReason = if ($row.PSObject.Properties.Match('CandidateSelectionReason').Count -gt 0 -and $row.CandidateSelectionReason) { [string]$row.CandidateSelectionReason } else { 'Selection reason unavailable.' }
+        if ($equivalenceStatus -eq 'NotEquivalent') {
+            $validation = "$validation Not a validated 1:1 equivalent; see the compared-capability differences in the recommendation column."
+        }
 
         $nextStep = if ($retirementClass -eq 'AdvisorConfirmed') {
             'Open Advisor recommendation, confirm affected resource and plan remediation.'
@@ -5653,9 +6078,11 @@ function Build-ReportFacts {
         $workloadRoleVal = if ($row.PSObject.Properties.Match('WorkloadRole').Count -gt 0) { [string]$row.WorkloadRole } else { '' }
         $noteParts = New-Object 'System.Collections.Generic.List[string]'
         if ($recommendedSku -eq 'N/A') {
-            $noteParts.Add('No compatible in-family or same-shape target found; keep the current SKU and monitor the roadmap.') | Out-Null
+            $noteParts.Add('No compatible non-retiring alternative passed availability, architecture, capability and performance hard gates; manual architecture review is required.') | Out-Null
         }
         else {
+            # The selection rationale is surfaced separately as "Why selected"; only additional migration
+            # cautions (generation, CPU vendor, sensitive workload) belong in the note to avoid duplication.
             if ($generationChange) {
                 $noteParts.Add('Generation change (current SKU allows Gen1, target is Gen2-only): not a simple resize - confirm the OS image is Gen2 (or plan a Gen1->Gen2 conversion) and validate boot, drivers and extensions before migrating.') | Out-Null
             }
@@ -5700,6 +6127,9 @@ function Build-ReportFacts {
             SourceTag          = if ($retirementClass -eq 'AdvisorConfirmed') { 'Advisor (per-resource, confirmed)' } else { 'Learn (SKU-family, verify in Workbook)' }
             RecommendedSku     = $recommendedSku
             RecommendedSkuNote = $recommendedSkuNote
+            EquivalenceStatus  = $equivalenceStatus
+            EquivalenceDetails = $equivalenceDetails
+            SelectionReason    = $selectionReason
             GenerationChange   = $generationChange
             CommitmentImpact   = $commitmentImpact
             RetailDeltaMonthly = $retailDeltaMonthly
@@ -6108,6 +6538,35 @@ function Get-SkuFamilyToken {
     return ''
 }
 
+function Get-SkuCommercialWorkloadProfile {
+    param([Parameter(Mandatory = $false)][string]$SkuName)
+
+    switch (Get-SkuFamilyToken -Sku $SkuName) {
+        'A' { return 'General purpose' }
+        'B' { return 'Burstable general purpose' }
+        'D' { return 'General purpose' }
+        'DC' { return 'Confidential compute' }
+        'E' { return 'Memory optimized' }
+        'EC' { return 'Confidential compute' }
+        'F' { return 'Compute optimized' }
+        'G' { return 'Memory optimized' }
+        'H' { return 'High performance compute' }
+        'L' { return 'Storage optimized' }
+        'M' { return 'Memory optimized' }
+        'N' { return 'GPU accelerated' }
+        default { return 'Unknown' }
+    }
+}
+
+function Get-PreferredSuccessorFamilies {
+    param([Parameter(Mandatory = $false)][string]$SkuName)
+
+    switch (Get-SkuFamilyToken -Sku $SkuName) {
+        'A' { return @('B', 'D') }
+        default { return @() }
+    }
+}
+
 function Get-RemediationCostFlag {
     <#
     .SYNOPSIS
@@ -6145,7 +6604,13 @@ function Get-RemediationRationale {
         # contradict both the N/A outcome and the low-complexity wave. Report the honest no-target line.
         return 'No compatible in-family or same-shape target found; keep the current SKU and monitor the roadmap.'
     }
-    $basis = if ($Row.PSObject.Properties.Match('RecommendationBasis').Count -gt 0 -and $Row.RecommendationBasis) { [string]$Row.RecommendationBasis } else { '' }
+    $basis = if ($Row.PSObject.Properties.Match('CandidateSelectionReason').Count -gt 0 -and $Row.CandidateSelectionReason) {
+        [string]$Row.CandidateSelectionReason
+    }
+    elseif ($Row.PSObject.Properties.Match('RecommendationBasis').Count -gt 0 -and $Row.RecommendationBasis) {
+        [string]$Row.RecommendationBasis
+    }
+    else { '' }
     if (-not $CrossFamily -and $basis -match '(?i)\bcross-family migration\b') {
         $basis = 'Heuristic: compatible same-family modernization (requires architecture validation)'
     }
@@ -6182,6 +6647,10 @@ function Get-RemediationChecklist {
     }
     if ($Row.PSObject.Properties.Match('CommitmentRetirementImpact').Count -gt 0 -and [bool]$Row.CommitmentRetirementImpact) {
         $list.Add('Reserved Instance / Savings Plan coverage is impacted on retirement - review the affected commitment.') | Out-Null
+    }
+    if ($Row.PSObject.Properties.Match('CandidateEquivalenceStatus').Count -gt 0 -and [string]$Row.CandidateEquivalenceStatus -eq 'NotEquivalent') {
+        $details = if ($Row.PSObject.Properties.Match('CandidateEquivalenceDetails').Count -gt 0) { [string]$Row.CandidateEquivalenceDetails } else { 'Capability details unavailable.' }
+        $list.Add("Not 100% equivalent: $details") | Out-Null
     }
     return $list.ToArray()
 }
@@ -6617,6 +7086,9 @@ function ConvertTo-SimplifiedReportHtml {
 
     $costImpact = if ($null -ne $Facts.RetailDeltaMonthly) { Format-ReportMoney $Facts.RetailDeltaMonthly } else { 'N/A' }
     $costImpactCompact = if ($null -ne $Facts.RetailDeltaMonthly) { Format-CompactMoney $Facts.RetailDeltaMonthly } else { 'n/a' }
+    $costCoveredCount = if ($Facts.PSObject.Properties.Match('CostCovered').Count -gt 0) { [int]$Facts.CostCovered } else { 0 }
+    $costMissingCount = if ($Facts.PSObject.Properties.Match('CostMissing').Count -gt 0) { [int]$Facts.CostMissing } else { [math]::Max(0, [int]$Facts.RetireCount - $costCoveredCount) }
+    $costPopulationCount = $costCoveredCount + $costMissingCount
     $monitoringCount = @($Facts.MonitoringRows).Count
     $genChangeCount = if ($Facts.PSObject.Properties.Match('SkuChangeWithGenChange').Count -gt 0) { [int]$Facts.SkuChangeWithGenChange } else { 0 }
     $noGenChangeCount = if ($Facts.PSObject.Properties.Match('SkuChangeWithoutGenChange').Count -gt 0) { [int]$Facts.SkuChangeWithoutGenChange } else { 0 }
@@ -7294,7 +7766,7 @@ ul { margin-top: 8px; }
 <label for="view-coverage">Coverage <span>Evidence</span></label>
 </nav>
 <div class="side-item"><span>Generated (UTC)</span><strong>$(ConvertTo-HtmlText $generatedUtc)</strong></div>
-<div class="side-item"><span>Report version</span><strong>v$(ConvertTo-HtmlText $reportVersion)</strong></div>
+<div class="side-item"><span>Script version</span><strong>v$(ConvertTo-HtmlText $reportVersion)</strong></div>
 <div class="side-item"><span>Live sources</span><strong>$(ConvertTo-HtmlText $liveSources)</strong></div>
 <div class="side-item"><span>Release Communications API</span><strong>$(ConvertTo-HtmlText $releaseCommunicationStatusText)</strong></div>
 <div class="side-item"><span>Tenants / subscriptions</span><strong>$(ConvertTo-HtmlText $tenantCount) / $(ConvertTo-HtmlText $subscriptionCount)</strong></div>
@@ -7452,9 +7924,10 @@ $($waveBuilder.ToString())
 
 <section class="panel">
 <h2>CSA / Engineer Detail<span class="info-dot" title="Per-VM implementation view: wave, source, OS pricing basis, target SKU, validation caveats and next step.">i</span></h2>
+<p class="meta"><strong>Candidate-fit disclaimer:</strong> Recommended SKUs are nearest-fit candidates selected by commercial-family priority, effective vCPU/RAM proximity and validated Retail price; they are not automatically validated 1:1 workload equivalents. Verify family/workload profile, effective vCPU, RAM, temporary/local storage, CPU model and vendor, fixed versus burstable performance, disk and NIC limits, licensing and application behavior before migration.</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU</th><th>Validation</th><th>Next step</th></tr></thead>
+<thead><tr><th>Wave</th><th>VM</th><th>Current SKU</th><th>OS</th><th>What happens</th><th>Recommended SKU / equivalence</th><th>Validation</th><th>Next step</th></tr></thead>
 <tbody>
 "@
 
@@ -7503,6 +7976,16 @@ $($waveBuilder.ToString())
         if ($row.PSObject.Properties.Match('GenerationChange').Count -gt 0 -and $row.GenerationChange) {
             $recommendedCell = "$recommendedCell <span class='tag tag-gen'>Gen1&rarr;Gen2</span>"
         }
+        $equivalenceStatus = if ($row.PSObject.Properties.Match('EquivalenceStatus').Count -gt 0 -and $row.EquivalenceStatus) { [string]$row.EquivalenceStatus } else { 'Unknown' }
+        $equivalenceLabel = if ($equivalenceStatus -eq 'Equivalent') { 'Equivalent' } elseif ($equivalenceStatus -eq 'NotEquivalent') { 'Not equivalent' } else { $equivalenceStatus }
+        $equivalenceClass = if ($equivalenceStatus -eq 'Equivalent') { 'tag-gen' } else { 'tag-osflag' }
+        $recommendedCell = "$recommendedCell <span class='tag $equivalenceClass'>$(ConvertTo-HtmlText $equivalenceLabel)</span>"
+        $equivalenceDetails = if ($row.PSObject.Properties.Match('EquivalenceDetails').Count -gt 0 -and $row.EquivalenceDetails) { [string]$row.EquivalenceDetails } else { 'Compared-capability details unavailable.' }
+        $fitConfidence = if ($equivalenceStatus -eq 'Equivalent') { '100% compared-capability match' } else { 'candidate - verify' }
+        $recommendedCell = "$recommendedCell<br/><span class='meta'><strong>Fit confidence:</strong> $(ConvertTo-HtmlText $fitConfidence)<br/><strong>Compared capabilities:</strong> $(ConvertTo-HtmlText $equivalenceDetails)</span>"
+        if ($row.PSObject.Properties.Match('SelectionReason').Count -gt 0 -and $row.SelectionReason) {
+            $recommendedCell = "$recommendedCell<br/><span class='meta'><strong>Why selected:</strong> $(ConvertTo-HtmlText $row.SelectionReason)</span>"
+        }
         if ($row.PSObject.Properties.Match('RecommendedSkuNote').Count -gt 0 -and $row.RecommendedSkuNote) {
             $recommendedCell = "$recommendedCell<br/><span class='meta'>$(ConvertTo-HtmlText $row.RecommendedSkuNote)</span>"
         }
@@ -7545,6 +8028,7 @@ $monitoringTableHtml
 <section class="panel">
 <h2>Cost Impact (monthly)</h2>
 $(if ($hasCostSplit) { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Total increase</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $increaseValue))</div></div><div class='money-cell'><div class='money-label'>Total decrease</div><div class='money-value'>$(ConvertTo-HtmlText (Format-ReportMoney $decreaseValue))</div></div><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" } else { "<div class='money-grid'><div class='money-cell'><div class='money-label'>Net</div><div class='money-value'>$(ConvertTo-HtmlText $costImpact)</div></div></div>" })
+<p class="meta">Retail delta coverage: $(ConvertTo-HtmlText $costCoveredCount) of $(ConvertTo-HtmlText $costPopulationCount) retirement-path VM(s). Compare net values across runs only when this coverage denominator is unchanged.</p>
 </section>
 
 <section class="panel">
@@ -8004,8 +8488,8 @@ try {
 
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Collecting compute SKU catalog"
-    Write-Log "Collecting compute SKU catalog"
-    $catalog = Get-ComputeSkuCatalogCached -RegionsFilter $Regions -SubscriptionIdForRest $effectiveSubscriptionIds[0] -UseRestApi $UseResourceSkusRestApi -ApiVersion $ResourceSkusApiVersion -IncludeExtendedLocations:$IncludeExtendedLocationsInSkuApi -CacheDir $effectiveCacheRoot -UseCache $UsePersistentCache -TtlHours $SkuCacheTtlHours -ForceRefresh $forceSkuCacheRefresh -TenantId $script:EffectiveTenantId
+    Write-Log "Collecting subscription-scoped compute SKU catalogs"
+    $catalogBySubscription = Get-ComputeSkuCatalogsBySubscription -SubscriptionIds $effectiveSubscriptionIds -Inventory $inventory -RegionsFilter $Regions -UseRestApi $UseResourceSkusRestApi -ApiVersion $ResourceSkusApiVersion -IncludeExtendedLocations:$IncludeExtendedLocationsInSkuApi -CacheDir $effectiveCacheRoot -UseCache $UsePersistentCache -TtlHours $SkuCacheTtlHours -ForceRefresh $forceSkuCacheRefresh -TenantId $script:EffectiveTenantId
 
     $priceMap = @{}
     $commitmentMap = @{}
@@ -8074,7 +8558,7 @@ try {
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Computing recommendations"
     Write-Log "Computing recommendations"
-    $results = Build-Recommendations -Inventory $inventory -Catalog $catalog -PriceMap $priceMap -CommitmentMap $commitmentMap -FirstSeenMap $firstSeenMap -Retirements $retirements -AdvisorHints $advisorHints -Top $TopCandidates -AllowArchChange:$AllowArchitectureChange -MaxVcpuIncreaseRatio $MaxRecommendedVcpuIncreaseRatio -MaxMemoryIncreaseRatio $MaxRecommendedMemoryIncreaseRatio -MaxCostIncreasePercent $MaxRecommendedCostIncreasePercent -MinPerfRatio $MinRecommendedPerfRatio -EquivalentVcpuTolerancePercent $EquivalentVcpuTolerancePercent -EquivalentMemoryTolerancePercent $EquivalentMemoryTolerancePercent
+    $results = Build-RecommendationsBySubscription -Inventory $inventory -CatalogBySubscription $catalogBySubscription -PriceMap $priceMap -CommitmentMap $commitmentMap -FirstSeenMap $firstSeenMap -Retirements $retirements -AdvisorHints $advisorHints -Top $TopCandidates -AllowArchChange:$AllowArchitectureChange -MaxVcpuIncreaseRatio $MaxRecommendedVcpuIncreaseRatio -MaxMemoryIncreaseRatio $MaxRecommendedMemoryIncreaseRatio -MaxCostIncreasePercent $MaxRecommendedCostIncreasePercent -MinPerfRatio $MinRecommendedPerfRatio -EquivalentVcpuTolerancePercent $EquivalentVcpuTolerancePercent -EquivalentMemoryTolerancePercent $EquivalentMemoryTolerancePercent
 
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Generating report output"

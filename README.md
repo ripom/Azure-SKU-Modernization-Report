@@ -1,11 +1,12 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.8`
+**Current version:** `v0.9`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
 > ([source HTML](examples/Azure-SKU-Modernization-Report-example.html)).
-> It shows the generated report experience without publishing real Azure resource names.
+> It is a sanitized illustrative artifact and may be regenerated separately from the current release; use a
+> fresh local run for release-accurate labels, controls and counts.
 
 ## Quick navigation
 
@@ -116,8 +117,8 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 ## Review tests
 
 The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
-recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.8`
-baseline contains 133 tests and is validated with Pester 5.7.1.
+recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.9`
+baseline contains 164 tests and is validated with Pester 5.7.1.
 
 Run it with Pester 5:
 
@@ -140,6 +141,33 @@ external publication. It verifies that:
 - commercial RI purchase/renewal notices cannot become technical VM-size retirements;
 - unknown sources receive low confidence, unavailable official data is not fabricated, and strict mode
   fails closed when every enabled live source fails;
+- every retiring SKU receives a non-retiring catalog alternative when at least one candidate passes the
+  availability, architecture, workload-class and performance hard gates;
+- the retirement fallback can cross family, upsize and switch Intel/AMD, but cannot cross the x64/ARM
+  boundary or select a target that is itself on a known retirement path;
+- same-family candidates prioritize the lowest validated Retail price, while cross-family candidates first
+  minimize vCPU/memory distance and then Retail price;
+- recommendations do not contain hardcoded SKU-to-SKU mappings. They use live catalog candidates plus explicit
+  family-level policy. For retiring A-family basic VMs, the preferred successor order is B (basic/burstable),
+  then D (general purpose), then the generic cross-family search. Each family is considered only when a candidate
+  passes availability, architecture, workload-class, performance, retirement and configured cost gates;
+- within the selected successor family, ranking minimizes effective vCPU/RAM growth and then Retail price. The
+  regression suite pins `A1_v2 -> B2als_v2 -> W3`, proves that D is selected when B fails a gate, and verifies
+  that generic fallback remains available when both preferred families fail their hard gates;
+- fully tied candidates use the normalized SKU name as the final deterministic ordering key, so API/catalog
+  input order cannot change a recommendation. A repeat-run gate also requires byte-identical VM-to-target
+  mappings for identical inputs;
+- reductions in local temporary storage, local NVMe, maximum NICs or maximum data disks are retained as
+  explicit validation warnings rather than suppressing an otherwise suitable lower-cost target;
+- the engineer view labels each target as equivalent or non-equivalent on compared catalog capabilities,
+  shows exact differences including commercial workload-profile and known CPU-vendor changes plus selection rationale, and states that workload profile, burstability, CPU,
+  storage, NIC/disk ceilings, licensing and application behavior still require workload validation;
+- `N/A` is retained only for an explicit hard-gate impossibility, not merely because no same-family or
+  equivalent-shape target exists;
+- remediation waves depend only on urgency and raw workload/change facts. Recommendation wording and the
+  advisory RI/SP retirement-impact flag cannot promote or demote a VM;
+- standalone Retail commitment discovery queries Reservation records only. Savings Plan eligibility remains
+  derived from nested Consumption pricing data rather than a standalone Retail `priceType` query;
 - source counts, evidence classes, remediation waves and rendered totals reconcile before publication.
 
 `High` confidence means that the evidence came through an accepted official-source path and passed the
@@ -310,15 +338,15 @@ At a high level the script follows this deterministic pipeline:
   their detail documents are downloaded. All returned notices are rendered by default. Notices are
   classified as Corroborated, FinOps or Review-only. A guard ensures Coverage rendering cannot mutate the
   findings already computed from the source result.
-4. **SKU and price catalog:** loads region-scoped compute SKU metadata plus Retail Prices data, compacting
-  each Compute SKU page immediately to keep memory bounded and using local caches when complete and fresh.
-5. **Recommendation engine:** selects compatible target SKUs and records generation, architecture,
-  quota/capacity and validation caveats. When a legacy 1-vCPU B-series size such as `Standard_B1s` has
-  no equivalent modern shape, the engine can select the smallest compatible modern burstable upsize
-  while retaining cost, memory, architecture, capability and Azure scope restrictions. For x64 targets,
-  the engine prefers the current CPU vendor (Intel or AMD). A mixed-vendor target is selected only when
-  no compatible same-vendor target exists or when its known Retail price is lower; the reason is shown in
-  the recommendation note. An x64-to-ARM or ARM-to-x64 target is never proposed.
+4. **SKU and price catalog:** loads a subscription-scoped, region-filtered Compute SKU catalog for each
+  subscription plus shared Retail Prices data. Compute SKU pages are compacted immediately to keep memory
+  bounded, and cache entries are isolated by tenant, subscription and region scope. A catalog failure in one
+  subscription keeps its VM rows for manual review instead of applying restrictions from another subscription.
+5. **Recommendation engine:** selects compatible target SKUs through the governed cascade documented below
+  and records generation, architecture, quota/capacity and validation caveats. For x64 targets, the normal
+  paths prefer the current CPU vendor (Intel or AMD). A mixed-vendor target is selected only when no compatible
+  same-vendor target exists or when its known Retail price is lower; the reason is shown in the recommendation
+  note. An x64-to-ARM or ARM-to-x64 target is never proposed.
 6. **Classification:** builds standalone VM retirement facts, remediation waves and sidecar previews
   for Batch, VMSS and RI cutoff planning.
 7. **Validation gates:** checks source health, fact reconciliation, monitoring separation, OS-aware
@@ -326,6 +354,57 @@ At a high level the script follows this deterministic pipeline:
 8. **Output generation:** writes CSV, JSON, HTML and logs into the timestamped output folder.
 
 The HTML is a presentation layer over computed facts. It does not invent new counts or reclassify rows.
+
+## Recommendation cascade for retiring SKUs
+
+The engine evaluates candidates in this order:
+
+1. same family and workload model;
+2. same vCPU/memory shape on a newer generation;
+3. bounded burstable modernization, including the minimum 1-to-2-vCPU step when required;
+4. technically compatible nearby/cross-family target;
+5. governed retirement fallback across non-retiring x64 families, with upsize and Intel/AMD change allowed.
+
+The final retirement fallback exists to prevent a retiring SKU from being left without a recommendation only
+because its family or exact shape has no modern successor. It preserves these hard gates:
+
+- the target is available in the VM's region and subscription;
+- x64 and ARM64 are never crossed;
+- vCPU and memory are not reduced;
+- Premium/Ultra disk and accelerated-networking support are not regressed;
+- general-purpose, GPU, HPC and Confidential Compute workload classes are not crossed;
+- the configured performance floor is met using a common performance model;
+- the target is not itself matched by a known retirement signal.
+
+The configured cost and ordinary upsize ceilings remain normal-path controls. For a retiring SKU they cannot
+by themselves suppress the last safe alternative: cost, size and CPU vendor instead influence candidate
+ranking and are surfaced as validation impacts. `CandidateTargetSku = N/A` therefore means no catalog target
+passed the hard gates and requires manual architecture review. It does not mean only that the current family
+lacked an equivalent size.
+
+Candidate ranking follows two cost-aware priorities. Within the same family, the lowest validated Retail
+price wins among candidates that pass the hard gates. For cross-family and retirement fallback candidates,
+the engine first minimizes combined proportional vCPU/memory distance and then selects the lowest Retail
+price among equally close shapes. Generation, CPU vendor and feature score are later tie-breakers.
+
+Maximum data-disk count, maximum NIC count and temporary/local-storage form are SKU ceilings, not evidence of
+actual workload use. They therefore do not force an oversized target. Any reduction or resource/cache/NVMe
+change is surfaced in `ValidationChecklist` and `MigrationRisksAndBlocks` as a warning to compare against the
+VM's actual attachments and storage dependency before resize.
+
+Every selected target also exposes `CandidateEquivalenceStatus`, `CandidateEquivalenceDetails` and
+`CandidateSelectionReason` in JSON/CSV. `Equivalent` means an exact match on effective vCPU, memory, maximum
+data disks, maximum NICs, temporary/local-storage type, Premium IO, Ultra SSD and Accelerated Networking.
+Any difference produces `NotEquivalent` with explicit `current -> target` values. The HTML engineer view shows
+the equivalence badge, why the target was selected and the same differences in its Validation column.
+
+CPU comparisons use `vCPUsAvailable` when Azure publishes it, falling back to nominal `vCPUs` only when the
+available count is absent. Constrained variants such as `Standard_F4-1amds_v7` therefore count as one usable
+vCPU, not four, and cannot replace a four-vCPU source merely because their parent shape has four nominal CPUs.
+
+Workload class is also a hard compatibility boundary. General-purpose SKUs cannot fall through to GPU (`N`),
+HPC (`H`) or Confidential Compute (`DC`/`EC`) families solely because their numeric capabilities happen to
+fit. Sources already in one of those specialized classes remain within the same class.
 
 ## CPU vendor and architecture policy
 
@@ -340,8 +419,26 @@ Candidate selection treats CPU architecture and CPU vendor as separate concerns:
 
 When both same-vendor and mixed-vendor candidates lack a usable Retail price, the same-vendor candidate
 retains priority. A missing price is never interpreted as a saving. All normal candidate gates still apply:
-region and subscription restrictions, vCPU/memory bounds, disk and NIC capabilities, Premium/Ultra disk,
-accelerated networking, performance floor and configured cost ceiling.
+region and subscription restrictions, vCPU/memory bounds, workload class, Premium/Ultra disk, accelerated
+networking, performance floor and configured cost ceiling. NIC, data-disk and local-storage differences are
+advisory checks.
+
+For a SKU on a live retirement path, the engine must provide a non-retiring alternative whenever one passes
+the hard safety gates. If same-family and equivalent-shape selection returns no target, a governed fallback
+searches other x64 families, permits a compute/memory upsize and may switch Intel/AMD. Availability,
+subscription restrictions, architecture, workload class and the performance floor remain mandatory;
+the configured cost ceiling becomes a ranking signal rather than a blocker. A target already on a known
+retirement path is never proposed. `N/A` is emitted only when no catalog candidate passes these hard gates,
+with an explicit manual-architecture-review reason.
+
+Local temporary storage is detected from Azure capacity and placement capabilities (`MaxResourceVolumeMB`,
+cached-disk bytes, local NVMe size and ephemeral OS disk placements) plus the Azure SKU `d` feature marker when
+capacity metadata is incomplete. A target may differ or have no local storage, but the report emits a warning
+check and treats the saving as conditional on confirming that the workload does not depend on that capability.
+
+Constrained Azure size names such as `Standard_DS12-1_v2` and `Standard_DS12-2_v2` inherit the retirement
+series of their parent size (`Dsv2-series`). Numeric constrained-vCPU suffixes do not allow an otherwise
+retiring SKU to pass as a non-retiring target.
 
 The vendor is read first from Compute SKU capability metadata when Azure supplies a recognized manufacturer
 or vendor field. For x64 records without that metadata, the resolver uses Azure SKU naming semantics (for
@@ -549,10 +646,10 @@ default and effect.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-TopCandidates` | `int` | `3` | Maximum number of candidate SKUs (Option A/B/C…) proposed for each VM. |
-| `-MaxRecommendedVcpuIncreaseRatio` | `double` | `1.5` | Maximum allowed vCPU increase ratio for a candidate (1.5 = +50%). For a 1-vCPU legacy B-series SKU with no equivalent modern shape, the burstable fallback permits only the minimum 2-vCPU step and retains all other compatibility gates. |
-| `-MaxRecommendedMemoryIncreaseRatio` | `double` | `1.5` | Maximum allowed memory increase ratio for a candidate. |
-| `-MaxRecommendedCostIncreasePercent` | `double` | `20` | Maximum tolerated retail cost increase percentage for a candidate. |
-| `-MinRecommendedPerfRatio` | `double` | `0.95` | Minimum performance (index) ratio of the candidate relative to the current SKU. |
+| `-MaxRecommendedVcpuIncreaseRatio` | `double` | `1.5` | Maximum allowed vCPU increase ratio on normal candidate paths (1.5 = +50%). The bounded burstable path permits the minimum 1-to-2-vCPU step. The final retirement fallback may exceed this ceiling only to provide a hard-compatible non-retiring alternative and exposes the upsize for validation. |
+| `-MaxRecommendedMemoryIncreaseRatio` | `double` | `1.5` | Maximum allowed memory increase ratio on normal candidate paths. The final retirement fallback may exceed it only to avoid leaving a retiring SKU without a hard-compatible alternative. |
+| `-MaxRecommendedCostIncreasePercent` | `double` | `20` | Maximum tolerated Retail cost increase on normal candidate paths. For a retiring SKU's final governed fallback, cost affects ranking and disclosure but does not override availability, architecture, capability or performance safety. |
+| `-MinRecommendedPerfRatio` | `double` | `0.95` | Minimum performance (index) ratio of the candidate relative to the current SKU. Applied to same-family, same-shape, burstable and cross-family candidates. |
 | `-EquivalentVcpuTolerancePercent` | `double` | `15` | vCPU percentage tolerance to consider a candidate "equivalent". |
 | `-EquivalentMemoryTolerancePercent` | `double` | `20` | Memory percentage tolerance to consider a candidate "equivalent". |
 | `-AllowArchitectureChange` | `switch` | off | Relaxes matching for non-ARM architecture metadata differences. ARM remains a hard boundary: the engine never proposes x64↔Arm64 migration. |

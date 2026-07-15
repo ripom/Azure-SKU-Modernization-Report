@@ -588,6 +588,13 @@ Describe 'Microsoft Learn retirement ingestion' {
         $result | Should -Not -BeNullOrEmpty
         $result.SeriesName | Should -Be 'Dv2-series'
     }
+
+    It 'maps constrained Dsv2 sizes to the same retiring series' -ForEach @(
+        @{ Sku = 'Standard_DS12-1_v2' }
+        @{ Sku = 'Standard_DS12-2_v2' }
+    ) {
+        Convert-SkuToSeriesKey -SkuName $Sku | Should -Be 'Dsv2-series'
+    }
 }
 
 Describe 'Live-source integrity' {
@@ -703,6 +710,182 @@ Describe 'Recommendation safety' {
         $row.RecommendationBasis | Should -Match 'burstable'
     }
 
+    It 'selects the lowest-cost compatible candidate within the same family' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2s_v3' -Family 'standardDSFamily'
+        $cheaperTarget = New-TestCatalogEntry -Name 'Standard_D2s_v4' -Family 'standardDSFamily'
+        $newerTarget = New-TestCatalogEntry -Name 'Standard_D2s_v5' -Family 'standardDSFamily'
+        $cheapestCrossFamily = New-TestCatalogEntry -Name 'Standard_B2s_v2' -Family 'standardBSFamily'
+        $prices = @{
+            'Standard_D2s_v3|eastus' = New-TestPrice -Sku 'Standard_D2s_v3' -Price 1.00
+            'Standard_D2s_v4|eastus' = New-TestPrice -Sku 'Standard_D2s_v4' -Price 0.70
+            'Standard_D2s_v5|eastus' = New-TestPrice -Sku 'Standard_D2s_v5' -Price 0.80
+            'Standard_B2s_v2|eastus' = New-TestPrice -Sku 'Standard_B2s_v2' -Price 0.50
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-same-family-cost' -Sku 'Standard_D2s_v3') `
+            -Catalog @($current, $newerTarget, $cheaperTarget, $cheapestCrossFamily) `
+            -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2s_v4'
+        $row.RecommendationBasis | Should -Match 'same family'
+        $row.CandidateEquivalenceStatus | Should -Be 'Equivalent'
+        $row.CandidateEquivalenceDetails | Should -Be '100% match on compared SKU capabilities'
+        $row.CandidateSelectionReason | Should -Match 'Same commercial family D; lowest Retail price'
+    }
+
+    It 'uses the SKU name as a stable tie-break regardless of catalog order' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2s_v3' -Family 'standardDSFamily'
+        $targetB = New-TestCatalogEntry -Name 'Standard_D2as_v5' -Family 'standardDSFamily'
+        $targetA = New-TestCatalogEntry -Name 'Standard_D2ams_v5' -Family 'standardDSFamily'
+        $prices = @{
+            'Standard_D2s_v3|eastus'  = New-TestPrice -Sku 'Standard_D2s_v3' -Price 1.00
+            'Standard_D2ams_v5|eastus' = New-TestPrice -Sku 'Standard_D2ams_v5' -Price 0.80
+            'Standard_D2as_v5|eastus'  = New-TestPrice -Sku 'Standard_D2as_v5' -Price 0.80
+        }
+
+        $targets = foreach ($catalog in @(@($current, $targetB, $targetA), @($current, $targetA, $targetB))) {
+            Build-Recommendations `
+                -Inventory @(New-TestVm -Name 'vm-deterministic' -Sku 'Standard_D2s_v3') `
+                -Catalog $catalog -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} `
+                -Retirements (New-EmptyRetirements) | Select-Object -ExpandProperty CandidateTargetSku -First 1
+        }
+
+        @($targets | Select-Object -Unique).Count | Should -Be 1
+        $targets[0] | Should -Be 'Standard_D2ams_v5'
+    }
+
+    It 'produces byte-identical target mappings when run twice with the same input' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2s_v3' -Family 'standardDSFamily'
+        $targetA = New-TestCatalogEntry -Name 'Standard_D2ams_v5' -Family 'standardDSFamily'
+        $targetB = New-TestCatalogEntry -Name 'Standard_D2as_v5' -Family 'standardDSFamily'
+        $inventory = @(
+            New-TestVm -Name 'vm-deterministic-1' -Sku 'Standard_D2s_v3'
+            New-TestVm -Name 'vm-deterministic-2' -Sku 'Standard_D2s_v3'
+        )
+        $prices = @{
+            'Standard_D2s_v3|eastus'  = New-TestPrice -Sku 'Standard_D2s_v3' -Price 1.00
+            'Standard_D2ams_v5|eastus' = New-TestPrice -Sku 'Standard_D2ams_v5' -Price 0.80
+            'Standard_D2as_v5|eastus'  = New-TestPrice -Sku 'Standard_D2as_v5' -Price 0.80
+        }
+
+        $outputs = 1..2 | ForEach-Object {
+            @(Build-Recommendations `
+                    -Inventory $inventory -Catalog @($current, $targetB, $targetA) `
+                    -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} `
+                    -Retirements (New-EmptyRetirements) |
+                    Sort-Object VmName |
+                    Select-Object VmName, CandidateTargetSku |
+                    ConvertTo-Json -Compress)
+        }
+
+        $outputs[0] | Should -BeExactly $outputs[1]
+    }
+
+    It 'prefers B over an exact-shape F target for a retiring basic A-family VM and routes the move to W3' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $exactShape = New-TestCatalogEntry -Name 'Standard_F1als_v7' -Family 'standardFalsv7Family'
+        $exactShape.Cap.vCPUs = '1'
+        $exactShape.Cap.MemoryGB = '2'
+        $generalPurposeUpsize = New-TestCatalogEntry -Name 'Standard_B2als_v2' -Family 'standardBalsv2Family'
+        $generalPurposeUpsize.Cap.vCPUs = '2'
+        $generalPurposeUpsize.Cap.MemoryGB = '4'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{
+            Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SeriesName = 'Av2-series'
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-shape-first' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $generalPurposeUpsize, $exactShape) `
+            -PriceMap @{} -CommitmentMap @{} -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_B2als_v2'
+        $row.CandidateSelectionReason | Should -Match 'Basic-family affinity A -> B'
+        $row.CandidateEquivalenceDetails | Should -Match 'workload profile: General purpose -> Burstable general purpose'
+
+        $planRow = [pscustomobject]@{
+            VmName = $row.VmName; CurrentSku = $row.CurrentSku; CandidateTargetSku = $row.CandidateTargetSku
+            Region = $row.Region; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'
+            RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'
+            SensitiveWorkload = $false; GenerationChange = $true; CommitmentRetirementImpact = $false
+        }
+        $plan = Build-RemediationPlan -Rows @($planRow)
+
+        @($plan.Waves[3].Items).Count | Should -Be 1
+        $plan.Waves[3].Items[0].VmName | Should -Be 'vm-shape-first'
+    }
+
+    It 'uses D as the second A-family successor when B fails the cost gate' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $bTarget = New-TestCatalogEntry -Name 'Standard_B2als_v2' -Family 'standardBalsv2Family'
+        $bTarget.Cap.vCPUs = '2'
+        $bTarget.Cap.MemoryGB = '4'
+        $dTarget = New-TestCatalogEntry -Name 'Standard_D2ls_v5' -Family 'standardDlsv5Family'
+        $dTarget.Cap.vCPUs = '2'
+        $dTarget.Cap.MemoryGB = '4'
+        $fTarget = New-TestCatalogEntry -Name 'Standard_F1als_v7' -Family 'standardFalsv7Family'
+        $fTarget.Cap.vCPUs = '1'
+        $fTarget.Cap.MemoryGB = '2'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{
+            Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SeriesName = 'Av2-series'
+        }
+        $prices = @{
+            'Standard_A1_v2|eastus'   = New-TestPrice -Sku 'Standard_A1_v2' -Price 1.00
+            'Standard_B2als_v2|eastus' = New-TestPrice -Sku 'Standard_B2als_v2' -Price 1.50
+            'Standard_D2ls_v5|eastus'  = New-TestPrice -Sku 'Standard_D2ls_v5' -Price 1.10
+            'Standard_F1als_v7|eastus' = New-TestPrice -Sku 'Standard_F1als_v7' -Price 1.05
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-a-to-d' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $fTarget, $dTarget, $bTarget) `
+            -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2ls_v5'
+        $row.CandidateSelectionReason | Should -Match 'Basic-family affinity A -> D'
+    }
+
+    It 'uses the generic fallback when both preferred A-family successors fail hard gates' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $blockedB = New-TestCatalogEntry -Name 'Standard_B2als_v2' -Family 'standardBalsv2Family' -Restrictions @(
+            [pscustomobject]@{ type = 'Location'; values = @('eastus'); reasonCode = 'NotAvailableForSubscription' }
+        )
+        $blockedB.Cap.vCPUs = '2'
+        $blockedB.Cap.MemoryGB = '4'
+        $blockedD = New-TestCatalogEntry -Name 'Standard_D2ls_v5' -Family 'standardDlsv5Family' -Restrictions @(
+            [pscustomobject]@{ type = 'Location'; values = @('eastus'); reasonCode = 'NotAvailableForSubscription' }
+        )
+        $blockedD.Cap.vCPUs = '2'
+        $blockedD.Cap.MemoryGB = '4'
+        $genericTarget = New-TestCatalogEntry -Name 'Standard_F1als_v7' -Family 'standardFalsv7Family'
+        $genericTarget.Cap.vCPUs = '1'
+        $genericTarget.Cap.MemoryGB = '2'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{
+            Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SeriesName = 'Av2-series'
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-a-generic-fallback' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $blockedB, $blockedD, $genericTarget) `
+            -PriceMap @{} -CommitmentMap @{} -FirstSeenMap @{} `
+            -Retirements $retirements -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_F1als_v7'
+        $row.RecommendationBasis | Should -Match 'cross-family migration'
+    }
+
     It 'prefers an Intel target for an Intel VM when the AMD twin is not cheaper' {
         $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
         $current.Cap.vCPUs = '1'
@@ -786,6 +969,26 @@ Describe 'Recommendation safety' {
         $row.Recommendation | Should -Match 'no compatible same-vendor alternative'
     }
 
+    It 'handles one same-vendor candidate under strict mode' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
+        $target = New-TestCatalogEntry -Name 'Standard_D2s_v5' -Family 'standardDsv5Family'
+
+        $row = & {
+            Set-StrictMode -Version Latest
+            Build-Recommendations `
+                -Inventory @(New-TestVm -Name 'vm-single-vendor') `
+                -Catalog @($current, $target) `
+                -PriceMap @{} `
+                -CommitmentMap @{} `
+                -FirstSeenMap @{} `
+                -Retirements (New-EmptyRetirements) | Select-Object -First 1
+        }
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2s_v5'
+        $row.CurrentCpuVendor | Should -Be 'Intel'
+        $row.TargetCpuVendor | Should -Be 'Intel'
+    }
+
     It 'never proposes ARM for an x64 VM even when architecture changes are enabled' {
         $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
         $current.Cap.vCPUs = '1'
@@ -829,6 +1032,476 @@ Describe 'Recommendation safety' {
         $row.CandidateTargetSku | Should -Be 'N/A'
     }
 
+    It 'provides a cross-family AMD upsize when a retiring Intel SKU has no equivalent alternative' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $current.Cap.PremiumIO = 'False'
+        $current.Cap.AcceleratedNetworkingEnabled = 'False'
+        $target = New-TestCatalogEntry -Name 'Standard_D2as_v7' -Family 'standardDasv7Family'
+        $target.Cap.Remove('ACUs')
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{
+            Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SeriesName = 'Av2-series'
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-retiring-a1' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2as_v7'
+        $row.RecommendationBasis | Should -Match 'Retirement fallback'
+        $row.CurrentCpuVendor | Should -Be 'Intel'
+        $row.TargetCpuVendor | Should -Be 'AMD'
+        $row.CpuVendorChange | Should -BeTrue
+    }
+
+    It 'flags an A-to-F candidate as a workload-profile and CPU-vendor change' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $target = New-TestCatalogEntry -Name 'Standard_F1als_v7' -Family 'standardFalsv7Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $target.Cap.vCPUs = '1'
+        $target.Cap.MemoryGB = '2'
+
+        $result = Get-CandidateEquivalenceResult `
+            -CurrentCap $current.Cap -CandidateCap $target.Cap `
+            -CurrentSkuName $current.Name -CandidateSkuName $target.Name
+
+        $result.Status | Should -Be 'NotEquivalent'
+        $result.Summary | Should -Match 'workload profile: General purpose -> Compute optimized'
+        $result.Summary | Should -Match 'CPU vendor: Intel -> AMD'
+    }
+
+    It 'reports explicit impossibility when a retiring SKU has no candidate that passes hard safety gates' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $armTarget = New-TestCatalogEntry -Name 'Standard_D2ps_v6' -Family 'standardDpsv6Family'
+        $armTarget.Cap.CpuArchitectureType = 'Arm64'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{
+            Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SeriesName = 'Av2-series'
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-impossible-a1' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $armTarget) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'N/A'
+        $row.RecommendationBasis | Should -Be 'No compatible non-retiring alternative passed hard safety gates'
+    }
+
+    It 'does not recommend a target that is itself on a retirement path' {
+        $current = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '2'
+        $current.Cap.PremiumIO = 'False'
+        $current.Cap.AcceleratedNetworkingEnabled = 'False'
+        $retiringTarget = New-TestCatalogEntry -Name 'Standard_D2as_v7' -Family 'standardDasv7Family'
+        $safeTarget = New-TestCatalogEntry -Name 'Standard_E2as_v7' -Family 'standardEasv7Family'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $retirements.Exact['standard_d2as_v7'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2029-01-01'; Source = 'LiveLearnMarkdown' }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-retiring-target' -Sku 'Standard_A1_v2') `
+            -Catalog @($current, $retiringTarget, $safeTarget) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_E2as_v7'
+    }
+
+    It 'maintains 100 percent recommended-alternative coverage for retiring SKUs when hard-compatible targets exist' {
+        $a1 = New-TestCatalogEntry -Name 'Standard_A1_v2' -Family 'standardAv2Family'
+        $a1.Cap.vCPUs = '1'
+        $a1.Cap.MemoryGB = '2'
+        $a1.Cap.PremiumIO = 'False'
+        $a1.Cap.AcceleratedNetworkingEnabled = 'False'
+        $f2 = New-TestCatalogEntry -Name 'Standard_F2' -Family 'standardFFamily'
+        $d2as = New-TestCatalogEntry -Name 'Standard_D2as_v7' -Family 'standardDasv7Family'
+        $f2als = New-TestCatalogEntry -Name 'Standard_F2als_v7' -Family 'standardFalsv7Family'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_a1_v2'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $retirements.Exact['standard_f2'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $retirements.Series = @(
+            [pscustomobject]@{ SeriesName = 'Av2/Amv2-series'; Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SourceGate = 'LiveLearnMarkdown'; SourceUrl = 'https://learn.microsoft.com/'; AsOf = '2026-07-15'; MigrationGuide = ''; Announcement = '' }
+            [pscustomobject]@{ SeriesName = 'F-series'; Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown'; SourceGate = 'LiveLearnMarkdown'; SourceUrl = 'https://learn.microsoft.com/'; AsOf = '2026-07-15'; MigrationGuide = ''; Announcement = '' }
+        )
+
+        $rows = @(Build-Recommendations `
+            -Inventory @(
+                (New-TestVm -Name 'vm-retiring-a1-all' -Sku 'Standard_A1_v2'),
+                (New-TestVm -Name 'vm-retiring-f2-all' -Sku 'Standard_F2')
+            ) `
+            -Catalog @($a1, $f2, $d2as, $f2als) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements)
+
+        $retirementRows = @($rows | Where-Object RetirementSourceGate -in @('LiveLearnMarkdown', 'ReleaseCommunicationsApi', 'LiveAdvisorArg'))
+        $recommendedRows = @($retirementRows | Where-Object { $_.CandidateTargetSku -and $_.CandidateTargetSku -ne 'N/A' })
+        $coveragePercent = if ($retirementRows.Count -gt 0) {
+            [math]::Round(($recommendedRows.Count / $retirementRows.Count) * 100, 2)
+        }
+        else { 0 }
+        $facts = Build-ReportFacts -Rows $rows
+
+        $retirementRows.Count | Should -Be 2
+        $coveragePercent | Should -Be 100 -Because 'every retirement-path SKU with a hard-compatible catalog target must receive an alternative'
+        $recommendedRows.Count | Should -Be $retirementRows.Count
+        $facts.RecommendationWithheldCount | Should -Be 0
+        ($facts.SkuChangeWithGenChange + $facts.SkuChangeWithoutGenChange) | Should -Be $facts.RetireCount
+        @($rows | Where-Object { $_.CandidateTargetSku -in @('Standard_A1_v2', 'Standard_F2') }).Count | Should -Be 0
+    }
+
+    It 'applies the configured performance floor to same-shape fallback candidates' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
+        $target = New-TestCatalogEntry -Name 'Standard_D2_v5' -Family 'standardDv5Family'
+        $current.Cap.ACUs = '100'
+        $target.Cap.ACUs = '80'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-perf-floor') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'N/A'
+    }
+
+    It 'applies the configured performance floor to burstable fallback candidates' {
+        $current = New-TestCatalogEntry -Name 'Standard_B1s' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '1'
+        $current.Cap.MemoryGB = '1'
+        $current.Cap.ACUs = '100'
+        $target = New-TestCatalogEntry -Name 'Standard_B2ts_v2' -Family 'standardBsv2Family'
+        $target.Cap.vCPUs = '2'
+        $target.Cap.MemoryGB = '1'
+        $target.Cap.ACUs = '40'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-burst-perf-floor' -Sku 'Standard_B1s') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'N/A'
+    }
+
+    It 'applies the configured performance floor to cross-family fallback candidates' {
+        $current = New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
+        $target = New-TestCatalogEntry -Name 'Standard_E2s_v5' -Family 'standardESv5Family'
+        $current.Cap.ACUs = '100'
+        $target.Cap.ACUs = '80'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-cross-perf-floor') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'N/A'
+    }
+
+    It 'compares fallback performance with one model when ACU metadata exists on only one SKU' {
+        $current = New-TestCatalogEntry -Name 'Standard_F2' -Family 'standardFFamily'
+        $target = New-TestCatalogEntry -Name 'Standard_F2als_v7' -Family 'standardFalsv7Family'
+        $current.Cap.ACUs = '100'
+        $target.Cap.Remove('ACUs')
+        $current.Cap.HyperVGenerations = 'V1,V2'
+        $target.Cap.HyperVGenerations = 'V2'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-mixed-perf-model' -Sku 'Standard_F2') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_F2als_v7'
+        $row.PerfModelCurrent | Should -Be $row.PerfModelTarget
+        $row.PerfDeltaPercent | Should -BeGreaterOrEqual 0
+        $row.GenerationChange | Should -BeTrue
+    }
+
+    It 'retains the DS2 v2 to D2ads v7 same-family candidate when performance models differ' {
+        $current = New-TestCatalogEntry -Name 'Standard_DS2_v2' -Family 'standardDSv2Family'
+        $target = New-TestCatalogEntry -Name 'Standard_D2ads_v7' -Family 'standardDadsv7Family'
+        $current.Cap.ACUs = '100'
+        $target.Cap.Remove('ACUs')
+        $current.Cap.HyperVGenerations = 'V1,V2'
+        $target.Cap.HyperVGenerations = 'V2'
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-ds2-regression' -Sku 'Standard_DS2_v2') `
+            -Catalog @($current, $target) `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) `
+            -MinPerfRatio 0.95 | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2ads_v7'
+        $row.RecommendationBasis | Should -Match 'same family'
+        $row.PerfModelCurrent | Should -Be $row.PerfModelTarget
+        $row.PerfDeltaPercent | Should -BeGreaterOrEqual 0
+        $row.GenerationChange | Should -BeTrue
+    }
+
+    It 'selects the cheaper candidate when local storage differs and emits a warning' {
+        $current = New-TestCatalogEntry -Name 'Standard_DS2_v2' -Family 'standardDSv2Family'
+        $current.Cap.MaxResourceVolumeMB = '14336'
+        $current.Cap.CachedDiskBytes = '92341796864'
+        $current.Cap.MaxDataDiskCount = '8'
+        $current.Cap.MaxNetworkInterfaces = '4'
+        $noLocalDisk = New-TestCatalogEntry -Name 'Standard_D2as_v7' -Family 'standardDasv7Family'
+        $noLocalDisk.Cap.MaxResourceVolumeMB = '0'
+        $noLocalDisk.Cap.EphemeralOSDiskSupported = 'False'
+        $noLocalDisk.Cap.MaxDataDiskCount = '4'
+        $noLocalDisk.Cap.MaxNetworkInterfaces = '2'
+        $localNvme = New-TestCatalogEntry -Name 'Standard_D2ads_v7' -Family 'standardDadsv7Family'
+        $localNvme.Cap.MaxResourceVolumeMB = '0'
+        $localNvme.Cap.NvmeDiskSizeInMiB = '112640'
+        $localNvme.Cap.EphemeralOSDiskSupported = 'True'
+        $prices = @{
+            'Standard_DS2_v2|eastus'  = New-TestPrice -Sku 'Standard_DS2_v2' -Price 1.00
+            'Standard_D2as_v7|eastus' = New-TestPrice -Sku 'Standard_D2as_v7' -Price 0.50
+            'Standard_D2ads_v7|eastus' = New-TestPrice -Sku 'Standard_D2ads_v7' -Price 0.90
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-local-storage-parity' -Sku 'Standard_DS2_v2') `
+            -Catalog @($current, $noLocalDisk, $localNvme) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2as_v7'
+        $row.RetailDeltaMonthly | Should -Be -365
+        $row.CostDeltaPercent | Should -Be -50
+        $row.ValidationChecklist | Should -Match 'Warning check: target has no temporary/local disk'
+        $row.ValidationChecklist | Should -Match 'maximum data disks decrease from 8 to 4'
+        $row.ValidationChecklist | Should -Match 'maximum NICs decrease from 4 to 2'
+        $row.MigrationRisksAndBlocks | Should -Match 'Warning check: target has no temporary/local disk'
+        $row.CandidateEquivalenceStatus | Should -Be 'NotEquivalent'
+        $row.CandidateEquivalenceDetails | Should -Match 'maximum data disks: 8 -> 4'
+        $row.CandidateEquivalenceDetails | Should -Match 'maximum NICs: 4 -> 2'
+        $row.CandidateEquivalenceDetails | Should -Match 'temporary/local storage: Resource/cache disk -> None'
+        $row.CandidateSelectionReason | Should -Match 'Same commercial family D; lowest Retail price'
+    }
+
+    It 'publishes a saving with a warning when the only candidate loses local temporary storage' {
+        $current = New-TestCatalogEntry -Name 'Standard_DS2_v2' -Family 'standardDSv2Family'
+        $current.Cap.MaxResourceVolumeMB = '14336'
+        $noLocalDisk = New-TestCatalogEntry -Name 'Standard_D2as_v7' -Family 'standardDasv7Family'
+        $noLocalDisk.Cap.MaxResourceVolumeMB = '0'
+        $noLocalDisk.Cap.EphemeralOSDiskSupported = 'False'
+        $prices = @{
+            'Standard_DS2_v2|eastus'  = New-TestPrice -Sku 'Standard_DS2_v2' -Price 1.00
+            'Standard_D2as_v7|eastus' = New-TestPrice -Sku 'Standard_D2as_v7' -Price 0.50
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-local-storage-impossible' -Sku 'Standard_DS2_v2') `
+            -Catalog @($current, $noLocalDisk) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements) | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D2as_v7'
+        $row.RetailDeltaMonthly | Should -Be -365
+        $row.CostDeltaPercent | Should -Be -50
+        $row.ValidationChecklist | Should -Match 'Warning check: target has no temporary/local disk'
+    }
+
+    It 'ranks cross-family cost after CPU and memory proximity' {
+        $current = New-TestCatalogEntry -Name 'Standard_B4ms' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '4'
+        $current.Cap.MemoryGB = '16'
+        $current.Cap.MaxDataDiskCount = '8'
+        $current.Cap.MaxNetworkInterfaces = '4'
+        $current.Cap.MaxResourceVolumeMB = '32768'
+        $minimumVcpuTarget = New-TestCatalogEntry -Name 'Standard_F4amds_v7' -Family 'standardFamdsv7Family'
+        $minimumVcpuTarget.Cap.vCPUs = '4'
+        $minimumVcpuTarget.Cap.MemoryGB = '32'
+        $minimumVcpuTarget.Cap.MaxDataDiskCount = '8'
+        $minimumVcpuTarget.Cap.MaxNetworkInterfaces = '4'
+        $minimumVcpuTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $oversizedCheaperTarget = New-TestCatalogEntry -Name 'Standard_D8lds_v6' -Family 'standardDldsv6Family'
+        $oversizedCheaperTarget.Cap.vCPUs = '8'
+        $oversizedCheaperTarget.Cap.MemoryGB = '16'
+        $oversizedCheaperTarget.Cap.MaxDataDiskCount = '8'
+        $oversizedCheaperTarget.Cap.MaxNetworkInterfaces = '4'
+        $oversizedCheaperTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_b4ms'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $prices = @{
+            'Standard_B4ms|eastus' = New-TestPrice -Sku 'Standard_B4ms' -Price 1.00
+            'Standard_F4amds_v7|eastus' = New-TestPrice -Sku 'Standard_F4amds_v7' -Price 3.00
+            'Standard_D8lds_v6|eastus' = New-TestPrice -Sku 'Standard_D8lds_v6' -Price 0.50
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-minimum-fallback-shape' -Sku 'Standard_B4ms') `
+            -Catalog @($current, $minimumVcpuTarget, $oversizedCheaperTarget) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D8lds_v6'
+        $row.RecommendationBasis | Should -Match 'Retirement fallback'
+    }
+
+    It 'excludes constrained CPU variants that reduce available vCPUs' {
+        $current = New-TestCatalogEntry -Name 'Standard_B4ms' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '4'
+        $current.Cap.vCPUsAvailable = '4'
+        $current.Cap.MemoryGB = '16'
+        $current.Cap.MaxDataDiskCount = '8'
+        $current.Cap.MaxNetworkInterfaces = '4'
+        $current.Cap.MaxResourceVolumeMB = '32768'
+        $constrainedTarget = New-TestCatalogEntry -Name 'Standard_F4-1amds_v7' -Family 'standardFamdsv7Family'
+        $constrainedTarget.Cap.vCPUs = '4'
+        $constrainedTarget.Cap.vCPUsAvailable = '1'
+        $constrainedTarget.Cap.MemoryGB = '32'
+        $constrainedTarget.Cap.MaxDataDiskCount = '8'
+        $constrainedTarget.Cap.MaxNetworkInterfaces = '4'
+        $constrainedTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $fullCpuTarget = New-TestCatalogEntry -Name 'Standard_F4amds_v7' -Family 'standardFamdsv7Family'
+        $fullCpuTarget.Cap.vCPUs = '4'
+        $fullCpuTarget.Cap.vCPUsAvailable = '4'
+        $fullCpuTarget.Cap.MemoryGB = '32'
+        $fullCpuTarget.Cap.MaxDataDiskCount = '8'
+        $fullCpuTarget.Cap.MaxNetworkInterfaces = '4'
+        $fullCpuTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_b4ms'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $prices = @{
+            'Standard_B4ms|eastus' = New-TestPrice -Sku 'Standard_B4ms' -Price 1.00
+            'Standard_F4-1amds_v7|eastus' = New-TestPrice -Sku 'Standard_F4-1amds_v7' -Price 0.50
+            'Standard_F4amds_v7|eastus' = New-TestPrice -Sku 'Standard_F4amds_v7' -Price 3.00
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-constrained-vcpu' -Sku 'Standard_B4ms') `
+            -Catalog @($current, $constrainedTarget, $fullCpuTarget) `
+            -PriceMap $prices `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements $retirements | Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_F4amds_v7'
+        $row.SuggestedSkus | Should -Not -Match 'Standard_F4-1amds_v7'
+    }
+
+    It 'does not cross from general-purpose into specialized workload classes' {
+        $current = New-TestCatalogEntry -Name 'Standard_B4ms' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '4'
+        $current.Cap.MemoryGB = '16'
+        $current.Cap.MaxDataDiskCount = '8'
+        $current.Cap.MaxNetworkInterfaces = '4'
+        $current.Cap.MaxResourceVolumeMB = '32768'
+        $confidentialTarget = New-TestCatalogEntry -Name 'Standard_DC4ds_v3' -Family 'standardDCdsv3Family'
+        $gpuTarget = New-TestCatalogEntry -Name 'Standard_NC4as_T4_v3' -Family 'standardNCSv3Family'
+        $generalTarget = New-TestCatalogEntry -Name 'Standard_D8lds_v6' -Family 'standardDldsv6Family'
+        foreach ($target in @($confidentialTarget, $gpuTarget)) {
+            $target.Cap.vCPUs = '4'
+            $target.Cap.MemoryGB = '32'
+            $target.Cap.MaxDataDiskCount = '8'
+            $target.Cap.MaxNetworkInterfaces = '4'
+            $target.Cap.MaxResourceVolumeMB = '32768'
+        }
+        $gpuTarget.Cap.GPUs = '1'
+        $generalTarget.Cap.vCPUs = '8'
+        $generalTarget.Cap.MemoryGB = '16'
+        $generalTarget.Cap.MaxDataDiskCount = '8'
+        $generalTarget.Cap.MaxNetworkInterfaces = '4'
+        $generalTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_b4ms'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $prices = @{
+            'Standard_B4ms|eastus' = New-TestPrice -Sku 'Standard_B4ms' -Price 1.00
+            'Standard_DC4ds_v3|eastus' = New-TestPrice -Sku 'Standard_DC4ds_v3' -Price 0.25
+            'Standard_NC4as_T4_v3|eastus' = New-TestPrice -Sku 'Standard_NC4as_T4_v3' -Price 0.50
+            'Standard_D8lds_v6|eastus' = New-TestPrice -Sku 'Standard_D8lds_v6' -Price 3.00
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-workload-class' -Sku 'Standard_B4ms') `
+            -Catalog @($current, $confidentialTarget, $gpuTarget, $generalTarget) `
+            -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} -Retirements $retirements |
+            Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D8lds_v6'
+        $row.SuggestedSkus | Should -Not -Match 'Standard_(DC|NC)'
+    }
+
+    It 'ranks minimum combined CPU and memory growth before individual dimensions' {
+        $current = New-TestCatalogEntry -Name 'Standard_B4ms' -Family 'standardBSFamily'
+        $current.Cap.vCPUs = '4'
+        $current.Cap.vCPUsAvailable = '4'
+        $current.Cap.MemoryGB = '16'
+        $current.Cap.MaxDataDiskCount = '8'
+        $current.Cap.MaxNetworkInterfaces = '4'
+        $current.Cap.MaxResourceVolumeMB = '32768'
+        $memoryOversizedTarget = New-TestCatalogEntry -Name 'Standard_E8-4as_v4' -Family 'standardEASv4Family'
+        $memoryOversizedTarget.Cap.vCPUs = '8'
+        $memoryOversizedTarget.Cap.vCPUsAvailable = '4'
+        $memoryOversizedTarget.Cap.MemoryGB = '64'
+        $memoryOversizedTarget.Cap.MaxDataDiskCount = '8'
+        $memoryOversizedTarget.Cap.MaxNetworkInterfaces = '4'
+        $memoryOversizedTarget.Cap.MaxResourceVolumeMB = '32768'
+        $balancedTarget = New-TestCatalogEntry -Name 'Standard_D8lds_v6' -Family 'standardDldsv6Family'
+        $balancedTarget.Cap.vCPUs = '8'
+        $balancedTarget.Cap.vCPUsAvailable = '8'
+        $balancedTarget.Cap.MemoryGB = '16'
+        $balancedTarget.Cap.MaxDataDiskCount = '8'
+        $balancedTarget.Cap.MaxNetworkInterfaces = '4'
+        $balancedTarget.Cap.NvmeDiskSizeInMiB = '225280'
+        $retirements = New-EmptyRetirements
+        $retirements.Exact['standard_b4ms'] = [pscustomobject]@{ Status = 'Announced'; RetireOn = '2028-11-15'; Source = 'LiveLearnMarkdown' }
+        $prices = @{
+            'Standard_B4ms|eastus' = New-TestPrice -Sku 'Standard_B4ms' -Price 1.00
+            'Standard_E8-4as_v4|eastus' = New-TestPrice -Sku 'Standard_E8-4as_v4' -Price 0.50
+            'Standard_D8lds_v6|eastus' = New-TestPrice -Sku 'Standard_D8lds_v6' -Price 3.00
+        }
+
+        $row = Build-Recommendations `
+            -Inventory @(New-TestVm -Name 'vm-balanced-shape' -Sku 'Standard_B4ms') `
+            -Catalog @($current, $memoryOversizedTarget, $balancedTarget) `
+            -PriceMap $prices -CommitmentMap @{} -FirstSeenMap @{} -Retirements $retirements |
+            Select-Object -First 1
+
+        $row.CandidateTargetSku | Should -Be 'Standard_D8lds_v6'
+    }
+
     It 'does not recommend a SKU restricted for the subscription or location' {
         $restriction = [pscustomobject]@{
             type            = 'Location'
@@ -850,6 +1523,50 @@ Describe 'Recommendation safety' {
             -Retirements (New-EmptyRetirements) | Select-Object -First 1
 
         $row.CandidateTargetSku | Should -Be 'N/A'
+    }
+
+    It 'computes recommendations with the catalog belonging to each subscription' {
+        $vmA = New-TestVm -Name 'vm-sub-a'
+        $vmA.SubscriptionId = 'sub-a'
+        $vmB = New-TestVm -Name 'vm-sub-b'
+        $vmB.SubscriptionId = 'sub-b'
+        $currentA = New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
+        $currentB = New-TestCatalogEntry -Name 'Standard_D2_v2' -Family 'standardDv2Family'
+        $targetA = New-TestCatalogEntry -Name 'Standard_D2_v5' -Family 'standardDv5Family'
+        $targetB = New-TestCatalogEntry -Name 'Standard_E2s_v5' -Family 'standardESv5Family'
+        $catalogs = @{
+            'sub-a' = @($currentA, $targetA)
+            'sub-b' = @($currentB, $targetB)
+        }
+
+        $rows = @(Build-RecommendationsBySubscription `
+            -Inventory @($vmA, $vmB) `
+            -CatalogBySubscription $catalogs `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements))
+
+        ($rows | Where-Object VmName -eq 'vm-sub-a').CandidateTargetSku | Should -Be 'Standard_D2_v5'
+        ($rows | Where-Object VmName -eq 'vm-sub-b').CandidateTargetSku | Should -Be 'Standard_E2s_v5'
+    }
+
+    It 'retains VM rows for manual review when a subscription catalog is unavailable' {
+        $vm = New-TestVm -Name 'vm-no-sub-catalog'
+        $vm.SubscriptionId = 'sub-missing'
+
+        $rows = @(Build-RecommendationsBySubscription `
+            -Inventory @($vm) `
+            -CatalogBySubscription @{} `
+            -PriceMap @{} `
+            -CommitmentMap @{} `
+            -FirstSeenMap @{} `
+            -Retirements (New-EmptyRetirements))
+
+        $rows.Count | Should -Be 1
+        $rows[0].VmName | Should -Be 'vm-no-sub-catalog'
+        $rows[0].CandidateTargetSku | Should -Be 'N/A'
+        $rows[0].Confidence | Should -Be 'CatalogUnavailable_NeedsManualReview'
     }
 }
 
@@ -929,6 +1646,39 @@ Describe 'Risk, cost, and delivery artifacts' {
         $facts.Rows[0].RecommendedSkuNote | Should -Match 'CPU vendor change \(Intel -> AMD\).*lower.*price'
     }
 
+    It 'propagates target equivalence and selection reason into report facts' {
+        $row = [pscustomobject]@{
+            VmName                       = 'vm-equivalence'
+            CurrentSku                   = 'Standard_B4ms'
+            Region                       = 'eastus'
+            OsType                       = 'Linux'
+            CurrentPriceOsBasis          = 'Linux'
+            CurrentWindowsMeterAvailable = $false
+            EvidenceSource               = 'LiveLearnMarkdown'
+            RetirementSourceGate         = 'LiveLearnMarkdown'
+            RetirementDate               = '2028-11-15'
+            CandidateTargetSku           = 'Standard_B4as_v2'
+            CandidateEquivalenceStatus   = 'NotEquivalent'
+            CandidateEquivalenceDetails  = 'maximum NICs: 4 -> 3; temporary/local storage: Resource/cache disk -> None'
+            CandidateSelectionReason     = 'Same commercial family B; lowest Retail price among candidates that passed the hard gates.'
+            GenerationChange             = $false
+            SensitiveWorkload            = $false
+            WorkloadRole                 = 'GeneralCompute'
+            CommitmentRetirementImpact   = $false
+            CostDeltaPublishable          = $false
+            AdvisorRecommendationId      = 'N/A'
+        }
+
+        $facts = Build-ReportFacts -Rows @($row)
+
+        $facts.Rows[0].EquivalenceStatus | Should -Be 'NotEquivalent'
+        $facts.Rows[0].EquivalenceDetails | Should -Match 'maximum NICs: 4 -> 3'
+        $facts.Rows[0].SelectionReason | Should -Match 'Same commercial family B'
+        $facts.Rows[0].Validation | Should -Match 'Not a validated 1:1 equivalent'
+        $facts.Rows[0].Validation | Should -Not -Match 'maximum NICs: 4 -> 3'
+        [string]::IsNullOrWhiteSpace($facts.Rows[0].RecommendedSkuNote) | Should -BeTrue
+    }
+
     It 'builds backlog items from retirement urgency rather than generic modernization priority' {
         $path = Join-Path $TestDrive 'backlog.csv'
         $rows = @(
@@ -975,14 +1725,35 @@ Describe 'External contract defaults' {
         $parameter.DefaultValue.Value | Should -Be '2026-03-02'
     }
 
-    It 'does not query Savings Plans as a standalone Retail price type' {
-        $function = $script:SourceAst.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Get-RetailCommitmentSignalsForVirtualMachines'
-        }, $true) | Select-Object -First 1
+    It 'queries only Reservation records for standalone Retail commitment signals' {
+        $script:commitmentRequestUris = New-Object 'System.Collections.Generic.List[string]'
 
-        $function.Extent.Text | Should -Not -Match "PriceType\s*=\s*'SavingsPlan'"
+        function Write-Progress {
+            param($Id, $ParentId, $Activity, $Status, $PercentComplete, [switch]$Completed)
+        }
+
+        function Invoke-RestMethod {
+            param($Uri, $Method, $TimeoutSec, $ErrorAction)
+            $script:commitmentRequestUris.Add([uri]::UnescapeDataString([string]$Uri)) | Out-Null
+            return [pscustomobject]@{
+                Items = @(
+                    [pscustomobject]@{
+                        armSkuName        = 'Standard_D2s_v5'
+                        armRegionName     = 'eastus'
+                        effectiveStartDate = '2026-01-01'
+                    }
+                )
+                NextPageLink = $null
+            }
+        }
+
+        $actual = Get-RetailCommitmentSignalsForVirtualMachines -RegionsFilter @('eastus') -MaxRetries 0
+
+        $script:commitmentRequestUris.Count | Should -Be 1
+        $script:commitmentRequestUris[0] | Should -Match "priceType eq 'Reservation'"
+        $script:commitmentRequestUris[0] | Should -Not -Match 'SavingsPlan'
+        $actual['Standard_D2s_v5|eastus'].SupportsReservedInstance | Should -BeTrue
+        $actual['Standard_D2s_v5|eastus'].SupportsSavingsPlan | Should -BeFalse
     }
 
     It 'pins the default Stream C endpoint to the Microsoft HTTPS API' {
@@ -1006,6 +1777,56 @@ Describe 'External contract defaults' {
 }
 
 Describe 'Compute SKU REST memory bounds' {
+    It 'switches subscription context before the non-REST SKU catalog fallback' {
+        Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'sub-a' } } }
+        Mock Set-AzContext {}
+        Mock Get-AzComputeResourceSku { @() }
+
+        $result = @(Get-ComputeSkuCatalog `
+            -RegionsFilter @('eastus') `
+            -SubscriptionIdForRest 'sub-b' `
+            -UseRestApi $false)
+
+        $result.Count | Should -Be 0
+        Assert-MockCalled Set-AzContext -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionId -eq 'sub-b'
+        }
+        Assert-MockCalled Get-AzComputeResourceSku -Times 1 -Exactly
+    }
+
+    It 'loads an isolated SKU catalog for each subscription and its inventory regions' {
+        $inventory = @(
+            [pscustomobject]@{ SubscriptionId = 'sub-a'; Location = 'eastus' }
+            [pscustomobject]@{ SubscriptionId = 'sub-a'; Location = 'westus2' }
+            [pscustomobject]@{ SubscriptionId = 'sub-b'; Location = 'uksouth' }
+        )
+        Mock Get-ComputeSkuCatalogCached {
+            param($SubscriptionIdForRest, $RegionsFilter)
+            @([pscustomobject]@{ Name = "sku-$SubscriptionIdForRest"; Regions = @($RegionsFilter) })
+        }
+
+        $catalogs = Get-ComputeSkuCatalogsBySubscription `
+            -SubscriptionIds @('sub-a', 'sub-b') `
+            -Inventory $inventory `
+            -RegionsFilter @('eastus', 'westus2', 'uksouth') `
+            -CacheDir $TestDrive `
+            -UseCache $false `
+            -TtlHours 1 `
+            -ForceRefresh $false
+
+        @($catalogs['sub-a']).Count | Should -Be 1
+        @($catalogs['sub-a'][0].Regions | Sort-Object) | Should -Be @('eastus', 'westus2')
+        @($catalogs['sub-b'][0].Regions) | Should -Be @('uksouth')
+        Assert-MockCalled Get-ComputeSkuCatalogCached -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionIdForRest -eq 'sub-a' -and @($RegionsFilter).Count -eq 2 -and
+            'eastus' -in $RegionsFilter -and 'westus2' -in $RegionsFilter
+        }
+        Assert-MockCalled Get-ComputeSkuCatalogCached -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionIdForRest -eq 'sub-b' -and @($RegionsFilter).Count -eq 1 -and
+            'uksouth' -in $RegionsFilter
+        }
+    }
+
     It 'queries each requested region separately and compacts paged VM results' {
         $script:requestedSkuUris = New-Object 'System.Collections.Generic.List[string]'
 
@@ -1214,10 +2035,6 @@ Describe 'Known-good control behavior' {
         }
     }
 
-    It 'does not hide risk thresholds inside retirement risk classification' {
-        (Get-Command Get-RetirementRiskLevel).Definition | Should -Not -Match '\b(365|730)\b'
-    }
-
     It 'routes Gen1-to-Gen2 or cross-family work to the architecture lane unless urgency is higher' {
         (Resolve-RemediationWave -RiskLevel Medium -IsSensitiveWorkload $true -SensitiveReason 'Infrastructure-DomainController' -IsGenerationChange $true -IsCrossFamily $false).Wave | Should -Be 'W3'
         (Resolve-RemediationWave -RiskLevel Watch -IsSensitiveWorkload $false -IsGenerationChange $true -IsCrossFamily $false).Wave | Should -Be 'W3'
@@ -1323,6 +2140,20 @@ Describe 'Known-good control behavior' {
         $floor.WaveNumber | Should -Be $Number
     }
 
+    It 'pins real regression <Scenario> to literal floor <Expected>' -ForEach @(
+        @{ Scenario = 'test DS2_v2->D2as_v5'; Risk = 'High'; Sensitive = $false; Gen = $true; Cross = $false; Expected = 'W1' }
+        @{ Scenario = 'ric-vm-dc F2->F2als_v7'; Risk = 'Medium'; Sensitive = $true; Gen = $true; Cross = $false; Expected = 'W3' }
+        @{ Scenario = 'A1_v2->B2als_v2 cross-family isolation'; Risk = 'Medium'; Sensitive = $false; Gen = $false; Cross = $true; Expected = 'W3' }
+    ) {
+        $floor = Resolve-RemediationWaveFloor -RiskLevel $Risk -IsSensitiveWorkload $Sensitive -IsGenerationChange $Gen -IsCrossFamily $Cross
+
+        $floor.Wave | Should -Be $Expected
+    }
+
+    It 'keeps date thresholds out of the fact-to-floor resolver' {
+        (Get-Command Resolve-RemediationWaveFloor).Definition | Should -Not -Match '\b(365|730)\b'
+    }
+
     It 'keeps Resolve-RemediationWave.Wave identical to the floor helper across the full fact matrix' -ForEach @(
         @{ Risk = 'Critical'; Sensitive = $false; Gen = $false; Cross = $false }
         @{ Risk = 'High';     Sensitive = $true;  Gen = $true;  Cross = $false }
@@ -1376,14 +2207,14 @@ Describe 'Known-good control behavior' {
 
     It 'accepts the current nine-row shape without changing wave membership' {
         $rows = @(
-            [pscustomobject]@{ VmName = 'demo-vm-01'; CurrentSku = 'Standard_DS2_v2'; CandidateTargetSku = 'Standard_D2ads_v7'; Region = 'italynorth'; RetirementDate = '2028-05-01'; RetirementRiskLevel = 'High'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $true; RetailDeltaMonthly = -1.46; CommitmentRetirementImpact = $false }
+            [pscustomobject]@{ VmName = 'test'; CurrentSku = 'Standard_DS2_v2'; CandidateTargetSku = 'Standard_D2as_v5'; Region = 'italynorth'; RetirementDate = '2028-05-01'; RetirementRiskLevel = 'High'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $true; RetailDeltaMonthly = -1.46; CommitmentRetirementImpact = $false }
             [pscustomobject]@{ VmName = 'demo-vm-02'; CurrentSku = 'Standard_B4ms'; CandidateTargetSku = 'Standard_B4as_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $false; RetailDeltaMonthly = -12.41; CommitmentRetirementImpact = $false }
-            [pscustomobject]@{ VmName = 'demo-vm-03'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'N/A'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $false; CommitmentRetirementImpact = $false }
-            [pscustomobject]@{ VmName = 'demo-vm-04'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'N/A'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $false; CommitmentRetirementImpact = $false }
+            [pscustomobject]@{ VmName = 'ric-vm-0-lan1'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'Standard_B2als_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $true; CommitmentRetirementImpact = $false }
+            [pscustomobject]@{ VmName = 'ric-vm-0-lan2'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'Standard_B2als_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $true; CommitmentRetirementImpact = $false }
             [pscustomobject]@{ VmName = 'demo-vm-05'; CurrentSku = 'Standard_B2ms'; CandidateTargetSku = 'Standard_B2as_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $true; GenerationChange = $false; WorkloadRole = 'Identity-DirectorySync'; RetailDeltaMonthly = -5.09; CommitmentRetirementImpact = $false }
             [pscustomobject]@{ VmName = 'demo-vm-06'; CurrentSku = 'Standard_B4ms'; CandidateTargetSku = 'Standard_B4as_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $true; GenerationChange = $false; WorkloadRole = 'Identity-ADFS'; RetailDeltaMonthly = -12.41; CommitmentRetirementImpact = $false }
-            [pscustomobject]@{ VmName = 'demo-vm-09'; CurrentSku = 'Standard_F2'; CandidateTargetSku = 'Standard_F2als_v7'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $true; GenerationChange = $true; WorkloadRole = 'Infrastructure-DomainController'; RetailDeltaMonthly = 19.71; CommitmentRetirementImpact = $false }
-            [pscustomobject]@{ VmName = 'demo-vm-10'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'N/A'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $false; CommitmentRetirementImpact = $false }
+            [pscustomobject]@{ VmName = 'ric-vm-dc'; CurrentSku = 'Standard_F2'; CandidateTargetSku = 'Standard_F2als_v7'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $true; GenerationChange = $true; WorkloadRole = 'Infrastructure-DomainController'; RetailDeltaMonthly = 19.71; CommitmentRetirementImpact = $false }
+            [pscustomobject]@{ VmName = 'ric-vm-1-lan1'; CurrentSku = 'Standard_A1_v2'; CandidateTargetSku = 'Standard_B2als_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $true; CommitmentRetirementImpact = $false }
             [pscustomobject]@{ VmName = 'demo-vm-12'; CurrentSku = 'Standard_B4ms'; CandidateTargetSku = 'Standard_B4as_v2'; Region = 'uksouth'; RetirementDate = '2028-11-15'; RetirementRiskLevel = 'Medium'; RetirementSourceGate = 'LiveLearnMarkdown'; EvidenceSource = 'LiveLearnMarkdown'; SensitiveWorkload = $false; GenerationChange = $false; RetailDeltaMonthly = -12.41; CommitmentRetirementImpact = $false }
         )
 
@@ -1393,32 +2224,12 @@ Describe 'Known-good control behavior' {
         @($plan.Waves[0].Items).Count | Should -Be 0
         @($plan.Waves[1].Items).Count | Should -Be 1
         @($plan.Waves[2].Items).Count | Should -Be 2
-        @($plan.Waves[3].Items).Count | Should -Be 1
-        @($plan.Waves[4].Items).Count | Should -Be 5
-        @($plan.Waves[1].Items | Where-Object VmName -eq 'demo-vm-01').Count | Should -Be 1
-        @($plan.Waves[3].Items | Where-Object VmName -eq 'demo-vm-09').Count | Should -Be 1
-    }
-
-    It 'computes the Build-RemediationPlan invariant from row facts and the assigned plan wave' {
-        $definition = (Get-Command Build-RemediationPlan).Definition
-
-        $definition | Should -Match 'Resolve-RemediationWaveFloor -RiskLevel \$riskLevel -IsSensitiveWorkload \$sensitive -IsGenerationChange \$genChange -IsCrossFamily \$crossFamily'
-        $definition | Should -Match '\$r\.Wave -ne \$expectedWave\.Wave'
-        $definition | Should -Match 'risk=\$riskLevel sensitive=\$sensitive generationChange=\$genChange crossFamily=\$crossFamily'
-        $definition | Should -Not -Match '\$waveResult\.Wave -ne \$expectedFloor'
-        $definition | Should -Not -Match '\b(365|730)\b'
-    }
-
-    It 'keeps remediation wave assignment and the guard on the same floor resolver' {
-        $resolveDefinition = (Get-Command Resolve-RemediationWave).Definition
-        $buildDefinition = (Get-Command Build-RemediationPlan).Definition
-
-        $resolveDefinition | Should -Match 'Resolve-RemediationWaveFloor'
-        $buildDefinition | Should -Match 'Resolve-RemediationWaveFloor'
-    }
-
-    It 'does not hide risk thresholds inside remediation wave routing' {
-        (Get-Command Resolve-RemediationWave).Definition | Should -Not -Match '\b(365|730)\b'
+        @($plan.Waves[3].Items).Count | Should -Be 4
+        @($plan.Waves[4].Items).Count | Should -Be 2
+        @($plan.Waves[1].Items | Where-Object { $_.VmName -eq 'test' -and $_.TargetSku -eq 'Standard_D2as_v5' }).Count | Should -Be 1
+        @($plan.Waves[3].Items | Where-Object TargetSku -eq 'Standard_B2als_v2').Count | Should -Be 3
+        @($plan.Waves[3].Items | Where-Object { $_.VmName -eq 'ric-vm-0-lan1' -and $_.TargetSku -eq 'Standard_B2als_v2' }).Count | Should -Be 1
+        @($plan.Waves[3].Items | Where-Object { $_.VmName -eq 'ric-vm-dc' -and $_.TargetSku -eq 'Standard_F2als_v7' }).Count | Should -Be 1
     }
 
     It 'labels High-only W1 rows as high urgency, not Advisor-sensitive' {
@@ -1427,7 +2238,7 @@ Describe 'Known-good control behavior' {
         Get-WaveChipLabel -WaveResult $waveResult | Should -Be 'W1 · High urgency'
     }
 
-    It 'keeps a medium-risk sensitive Gen1-to-Gen2 domain controller out of W4' {
+    It 'routes from raw facts rather than Same-shape recommendation text' {
         $row = [pscustomobject]@{
             VmName                    = 'domain-controller'
             CurrentSku                = 'Standard_F2'
@@ -1451,6 +2262,33 @@ Describe 'Known-good control behavior' {
         $plan.Waves[3].Items[0].VmName | Should -Be 'domain-controller'
         $plan.Waves[3].Items[0].ComplexityFloor | Should -Be 'W3'
         @($plan.Waves[4].Items).Count | Should -Be 0
+    }
+
+    It 'keeps commitment retirement impact advisory and outside wave routing when flag=<CommitmentImpact>' -ForEach @(
+        @{ CommitmentImpact = $false }
+        @{ CommitmentImpact = $true }
+    ) {
+        $row = [pscustomobject]@{
+            VmName                     = "commitment-$CommitmentImpact"
+            CurrentSku                 = 'Standard_D2_v2'
+            CandidateTargetSku         = 'Standard_D2s_v5'
+            Region                     = 'eastus'
+            RetirementDate             = '2028-05-01'
+            RetirementRiskLevel        = 'High'
+            RetirementSourceGate       = 'LiveLearnMarkdown'
+            EvidenceSource             = 'LiveLearnMarkdown'
+            SensitiveWorkload          = $false
+            GenerationChange           = $false
+            RecommendationBasis        = 'Same-family modernization'
+            CommitmentRetirementImpact = $CommitmentImpact
+        }
+
+        $plan = Build-RemediationPlan -Rows @($row)
+
+        @($plan.Waves[1].Items).Count | Should -Be 1
+        $plan.Waves[1].Items[0].Wave | Should -Be 'W1'
+        $plan.Waves[1].Items[0].UrgencyFloor | Should -Be 'W1'
+        $plan.Waves[1].Items[0].ComplexityFloor | Should -Be 'W4'
     }
 
     It 'labels a W3 card with only same-family Gen1-to-Gen2 items without Cross-family or class change' {
@@ -1490,10 +2328,16 @@ Describe 'Known-good control behavior' {
             SensitiveWorkload          = $true
             GenerationChange           = $true
             RecommendationBasis        = 'Same-shape refresh: same vCPU/RAM profile'
+            EquivalenceStatus          = 'NotEquivalent'
+            EquivalenceDetails         = 'temporary/local storage: Resource/cache disk -> None'
+            SelectionReason            = 'Same commercial family F; lowest Retail price among candidates that passed the hard gates.'
             CommitmentRetirementImpact = $false
         }
         $facts = [pscustomobject]@{
+            ReportVersion               = '0.9'
             RetailDeltaMonthly          = 0
+            CostCovered                 = 1
+            CostMissing                 = 0
             MonitoringRows              = @()
             SkuChangeWithGenChange      = 1
             SkuChangeWithoutGenChange   = 0
@@ -1520,6 +2364,13 @@ Describe 'Known-good control behavior' {
         $w3Card | Should -Match 'generation boundary'
         $w3Card | Should -Not -Match 'Cross-family'
         $w3Card | Should -Not -Match 'class change'
+        $html | Should -Match '<span>Script version</span><strong>v0\.9</strong>'
+        $html | Should -Match 'Retail delta coverage: 1 of 1 retirement-path VM\(s\)'
+        $html | Should -Match 'Compare net values across runs only when this coverage denominator is unchanged'
+        $html | Should -Match '<strong>Candidate-fit disclaimer:</strong> Recommended SKUs are nearest-fit candidates'
+        $html | Should -Match '<strong>Fit confidence:</strong> candidate - verify'
+        $html | Should -Match '<strong>Compared capabilities:</strong> temporary/local storage: Resource/cache disk -&gt; None'
+        $html | Should -Match '<strong>Why selected:</strong> Same commercial family F; lowest Retail price'
     }
 
     It 'labels a W3 card with cross-family items as Cross-family' {
@@ -1563,10 +2414,6 @@ Describe 'Known-good control behavior' {
 
         $sameFamilyHeader.Title | Should -Not -Be $crossFamilyHeader.Title
         $sameFamilyHeader.Note | Should -Not -Be $crossFamilyHeader.Note
-    }
-
-    It 'does not hide risk thresholds inside wave card header routing' {
-        (Get-Command Get-WaveCardHeader).Definition | Should -Not -Match '\b(365|730)\b'
     }
 
     It 'keeps High risk W1 workloads out of the executive act-now bucket' {

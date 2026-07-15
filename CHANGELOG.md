@@ -2,6 +2,92 @@
 
 ## Unreleased
 
+## v0.9 - 2026-07-15
+
+- Replaced hard parity gates for local temporary storage, maximum NICs and maximum data disks with explicit
+  per-row validation warnings. These SKU ceilings no longer force an oversized target when actual usage is
+  unknown.
+- Changed candidate ranking to prioritize the lowest validated Retail price within the same family. For
+  cross-family and retirement fallback candidates, proportional vCPU/memory proximity is evaluated first and
+  Retail price breaks equally close shapes.
+- Added warning details for loss or type change of resource/cache/local NVMe storage and reductions in maximum
+  NIC or data-disk counts; the same warnings appear in the checklist and migration risks.
+- Added structured target-equivalence output (`CandidateEquivalenceStatus`, details and selection reason) and
+  surfaced it in report facts, remediation checklists and the HTML engineer table. Non-equivalent targets list
+  exact current-to-target differences for compute, storage, disks, NICs and networking capabilities.
+- Added a fixed nearest-fit disclaimer and per-row fit-confidence summary to the HTML engineer view. The report
+  now explicitly requires validation of family/workload profile, burstability, CPU, storage, disk/NIC limits,
+  licensing and application behavior before migration. Structured equivalence details now also flag known
+  commercial workload-profile and Intel/AMD changes, including general-purpose to compute-optimized moves.
+- Deduplicated the engineer view so each fact appears once per row: the selection rationale is shown only under
+  `Why selected`, the capability differences only under `Compared capabilities`, and the recommendation note now
+  carries only the additional migration cautions (generation, CPU vendor, sensitive workload). The Validation
+  cell no longer repeats the full difference list.
+- Added the normalized SKU name as the final candidate-ranking tie-break so equal candidates remain stable when
+  Azure API/catalog input order changes.
+- Added explicit correctness gates for byte-identical target mappings across repeated identical runs.
+- Added family-level successor affinity for basic A-series VMs without hardcoding individual SKU matches: B is
+  preferred first, D second, and generic cross-family candidates only after both families fail the existing hard
+  and cost gates. Tests pin `A1_v2 -> B2als_v2 -> W3` and D fallback when B exceeds the cost ceiling.
+- Updated the nine-row wave fixture to the current live 1/2/4/2 distribution instead of the obsolete `N/A`
+  A-series state.
+- Removed five redundant source-text assertions already covered by configurable-threshold behavior, the full
+  32-case floor matrix and fail-closed planner tests. The suite now favors observable behavior over brittle
+  function-definition matching.
+- Added named literal floor pins for the live `test`, `ric-vm-dc` and `A1_v2 -> B2als_v2` regressions, plus
+  an explicit guard keeping date thresholds out of the fact-to-floor resolver. A temporary-copy mutation check
+  confirmed the floor matrix fails when cross-family complexity is incorrectly changed from W3 to W4.
+- Re-audited the regression suite and replaced the standalone Savings Plan source-text check with a behavioral
+  Retail request test. Removed a redundant renderer-definition assertion already covered by generated HTML.
+- Added regressions proving that A-family recommendations reach generic fallback when both preferred successor
+  families fail hard gates, that recommendation wording does not route waves, and that the RI/SP impact flag is
+  advisory and cannot alter wave assignment.
+- The optimized Pester 5.7.1 baseline contains 164 passing tests.
+
+- Enforced `MinRecommendedPerfRatio` in the final candidate gate shared by same-family, same-shape,
+  burstable and cross-family recommendation strategies; fallback paths can no longer bypass the configured
+  performance floor.
+- Made Compute SKU availability and restriction evaluation subscription-aware. Each subscription now gets
+  its own region-scoped catalog and cache entry, and recommendation computation uses only the catalog for the
+  VM's subscription.
+- Added fail-safe handling for a per-subscription catalog failure: affected VM rows remain in the report for
+  manual review rather than inheriting another subscription's availability data.
+- Ensured the non-REST `Get-AzComputeResourceSku` fallback switches to the requested subscription context
+  before collecting catalog data.
+- Fixed mixed-model performance comparisons: when ACU metadata exists for only one side, both current and
+  candidate SKUs are evaluated with the same generation-aware heuristic before enforcing the performance floor.
+- Fixed recommendation ranking under PowerShell strict mode when candidate filtering returns exactly one
+  same-vendor SKU; the result is now retained as a collection before evaluating its count.
+- Added a governed retirement fallback: when same-family and same-shape selection finds no target, retiring
+  SKUs search compatible non-retiring x64 families, permit upsize and may switch Intel/AMD. Availability,
+  architecture, workload class, required Premium/Ultra/Accelerated Networking features and performance remain
+  hard gates; `N/A` now means those gates made a target impossible, and a target already on a known retirement
+  path is never proposed.
+- Made candidate cost and ordinary upsize ceilings ranking/disclosure inputs only for the final retirement
+  fallback, so they cannot suppress the last hard-compatible alternative. x64/ARM boundaries, regional and
+  subscription availability, required Premium/Ultra/Accelerated Networking features and the performance floor
+  remain non-negotiable.
+- Fixed retirement matching for constrained size names such as `DS12-1_v2` and `DS12-2_v2`; these now map
+  to `Dsv2-series` and cannot be selected as supposedly non-retiring targets.
+- Made the governed retirement fallback rank minimum vCPU growth, then minimum memory growth, before vendor,
+  price, generation or feature score. A cheaper/newer oversized target can no longer outrank a smaller
+  compatible candidate.
+- Fixed constrained-vCPU evaluation to prefer Azure's `vCPUsAvailable` capability over nominal `vCPUs` in
+  performance, compatibility, candidate filtering and ranking. Variants such as `F4-1amds_v7` can no longer
+  masquerade as four-vCPU replacements when only one vCPU is usable.
+- Added workload-class parity so general-purpose VMs cannot be recommended GPU, HPC or Confidential Compute
+  targets merely because their numeric capabilities match.
+- Changed retirement fallback shape ordering to minimize combined proportional CPU and memory growth before
+  individual-dimension tie-breakers. This avoids trading exact CPU for disproportionate memory oversizing.
+- Exposed Retail delta price coverage in the HTML report so net values are not compared across runs with
+  different denominators, and relabeled report metadata as `Script version` for auditability.
+- Added focused Pester regressions for every performance fallback path, per-subscription catalog loading,
+  recommendation isolation, non-REST context selection, report metadata and cost-coverage disclosure. The
+  retirement contract covers cross-family Intel/AMD upsize, explicit hard-gate impossibility, exclusion of
+  already-retiring targets and complete target assignment whenever compatible catalog alternatives exist.
+- A live validation run produced targets for all 9 retirement-path VMs, no `N/A` recommendations, full 9/9
+  Retail-delta coverage and a delivery-ready result.
+
 ## v0.8 - 2026-07-14
 
 - Added runtime release metadata: the JSON report exposes top-level `ReportVersion`, the HTML provenance
