@@ -149,7 +149,7 @@ $ErrorActionPreference = "Stop"
 [int]$script:RiskCriticalDays = 365
 [int]$script:RiskHighDays = 730
 $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
-[string]$script:ReportVersion = '0.9'
+[string]$script:ReportVersion = '0.10'
 $script:RetailLastPageCount = 0
 $script:RetailLastDownloadComplete = $true
 $script:CommitmentLastDownloadComplete = $true
@@ -1315,7 +1315,7 @@ function Get-ComputeSkuCatalogFromRest {
 
     $headers = @{ Authorization = "Bearer $tokenValue" }
     $normalizedRegions = @($RegionsFilter | ForEach-Object { ConvertTo-NormalizedLocation ([string]$_) } | Where-Object { $_ } | Sort-Object -Unique)
-    $queryTargets = if ($normalizedRegions.Count -gt 0) { $normalizedRegions } else { @('*') }
+    $queryTargets = @(if ($normalizedRegions.Count -gt 0) { $normalizedRegions } else { '*' })
     $catalog = New-Object 'System.Collections.Generic.List[object]'
     $targetIndex = 0
 
@@ -8467,13 +8467,13 @@ try {
     $stage++
     Set-MainProgress -Stage $stage -TotalStages $totalStages -Activity "Azure SKU Modernization Analyst" -Status "Collecting VM inventory"
     Write-Log "Collecting VM inventory from Resource Graph"
-    $inventory = Get-ResourceGraphVmInventory -Subscriptions $effectiveSubscriptionIds
+    $inventory = @(Get-ResourceGraphVmInventory -Subscriptions $effectiveSubscriptionIds)
 
     Write-Log "Collecting Azure Batch pool inventory (public preview capability) from Resource Graph and Batch Management REST"
-    $batchPoolInventory = Get-ResourceGraphBatchPoolInventory -Subscriptions $effectiveSubscriptionIds -BatchApiVersion $BatchManagementApiVersion
+    $batchPoolInventory = @(Get-ResourceGraphBatchPoolInventory -Subscriptions $effectiveSubscriptionIds -BatchApiVersion $BatchManagementApiVersion)
 
     Write-Log "Collecting VM Scale Set inventory (public preview capability) from Resource Graph"
-    $vmssInventory = Get-ResourceGraphVmssInventory -Subscriptions $effectiveSubscriptionIds
+    $vmssInventory = @(Get-ResourceGraphVmssInventory -Subscriptions $effectiveSubscriptionIds)
 
     if (-not $inventory -or $inventory.Count -eq 0) {
         throw "No VM found. Check subscription scope/permissions."

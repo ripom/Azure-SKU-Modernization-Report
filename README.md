@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.9`
+**Current version:** `v0.10`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -117,8 +117,8 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 ## Review tests
 
 The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
-recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.9`
-baseline contains 164 tests and is validated with Pester 5.7.1.
+recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.10`
+baseline contains 171 tests and is validated with Pester 5.7.1.
 
 Run it with Pester 5:
 

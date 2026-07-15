@@ -24,6 +24,7 @@ BeforeAll {
     $script:RiskCriticalDays = 365
     $script:RiskHighDays = 730
     $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
+    $script:ReportVersion = '0.10'
     $script:EffectiveTenantId = 'test-tenant'
 
     function Write-Log {
@@ -1717,6 +1718,16 @@ Describe 'Risk, cost, and delivery artifacts' {
 }
 
 Describe 'External contract defaults' {
+    It 'publishes the v0.10 runtime report version' {
+        $assignment = $script:SourceAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '[string]$script:ReportVersion'
+        }, $true) | Select-Object -First 1
+
+        $assignment.Right.Expression.Value | Should -Be '0.10'
+    }
+
     It 'uses the Resource SKUs operation API version documented for that endpoint' {
         $parameter = $script:SourceAst.ParamBlock.Parameters | Where-Object {
             $_.Name.VariablePath.UserPath -eq 'ResourceSkusApiVersion'
@@ -1900,6 +1911,159 @@ Describe 'Compute SKU REST memory bounds' {
         $firstPageUris.Count | Should -Be 2
         ([uri]::UnescapeDataString($firstPageUris[0])) | Should -Match "`\$filter=location eq 'eastus'"
         ([uri]::UnescapeDataString($firstPageUris[1])) | Should -Match "`\$filter=location eq 'westeurope'"
+    }
+
+    It 'keeps a single requested REST region array-shaped under strict mode' {
+        Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'sub-test' } } }
+        Mock Get-AzAccessToken { [pscustomobject]@{ Token = 'test-token' } }
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                value    = @()
+                nextLink = $null
+            }
+        }
+
+        { Get-ComputeSkuCatalogFromRest -SubscriptionId 'sub-test' -RegionsFilter @('uksouth') } | Should -Not -Throw
+        Assert-MockCalled Invoke-RestMethod -Times 1 -Exactly
+    }
+}
+
+Describe 'Single-result external query contracts' {
+    It 'keeps Resource Graph inventory call sites array-shaped in the main workflow' {
+        $expectedCalls = @{
+            inventory          = 'Get-ResourceGraphVmInventory'
+            batchPoolInventory = 'Get-ResourceGraphBatchPoolInventory'
+            vmssInventory      = 'Get-ResourceGraphVmssInventory'
+        }
+
+        foreach ($variableName in $expectedCalls.Keys) {
+            $assignment = $script:SourceAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq "`$$variableName" -and
+                $node.Right.Extent.Text -match [regex]::Escape($expectedCalls[$variableName])
+            }, $true) | Select-Object -First 1
+
+            $assignment | Should -Not -BeNullOrEmpty
+            $assignment.Right.Expression | Should -BeOfType ([System.Management.Automation.Language.ArrayExpressionAst])
+        }
+    }
+
+    It 'handles one VM returned from one Resource Graph subscription' {
+        Mock Search-AzGraph {
+            [pscustomobject]@{
+                subscriptionId = 'sub-one'
+                resourceGroup  = 'rg-one'
+                name           = 'vm-one'
+                location       = 'uksouth'
+                vmSize         = 'Standard_D2s_v5'
+                osType         = 'Linux'
+                vmCreatedDate  = '2026-01-01'
+                tagsText       = ''
+                extensionsText = ''
+                SkipToken      = $null
+            }
+        }
+
+        $actual = @(Get-ResourceGraphVmInventory -Subscriptions @('sub-one'))
+
+        $actual.Count | Should -Be 1
+        $actual[0].VmName | Should -Be 'vm-one'
+        Assert-MockCalled Search-AzGraph -Times 1 -Exactly
+    }
+
+    It 'handles one Batch pool returned from one Resource Graph subscription' {
+        $script:batchQueryCall = 0
+        Mock Search-AzGraph {
+            $script:batchQueryCall++
+            if ($script:batchQueryCall -eq 1) {
+                return [pscustomobject]@{
+                    subscriptionId          = 'sub-one'
+                    resourceGroup           = 'rg-one'
+                    idLower                 = '/subscriptions/sub-one/resourcegroups/rg-one/providers/microsoft.batch/batchaccounts/batch-one/pools/pool-one'
+                    location                = 'uksouth'
+                    batchAccountName        = 'batch-one'
+                    poolName                = 'pool-one'
+                    vmSize                  = 'Standard_D2s_v5'
+                    allocationState         = 'steady'
+                    targetDedicatedNodes    = '1'
+                    targetLowPriorityNodes  = '0'
+                    targetSpotNodes         = '0'
+                    currentDedicatedNodes   = '1'
+                    currentLowPriorityNodes = '0'
+                    SkipToken               = $null
+                }
+            }
+            return [pscustomobject]@{
+                subscriptionId = 'sub-one'
+                resourceGroup  = 'rg-one'
+                name           = 'batch-one'
+                location       = 'uksouth'
+                SkipToken      = $null
+            }
+        }
+        Mock Get-AzAccessToken { [pscustomobject]@{ Token = 'test-token' } }
+        Mock Invoke-RestMethod { [pscustomobject]@{ value = @(); nextLink = $null } }
+
+        $actual = @(Get-ResourceGraphBatchPoolInventory -Subscriptions @('sub-one'))
+
+        $actual.Count | Should -Be 1
+        $actual[0].PoolName | Should -Be 'pool-one'
+        Assert-MockCalled Search-AzGraph -Times 2 -Exactly
+        Assert-MockCalled Invoke-RestMethod -Times 1 -Exactly
+    }
+
+    It 'handles one VMSS returned from one Resource Graph subscription' {
+        Mock Search-AzGraph {
+            [pscustomobject]@{
+                subscriptionId    = 'sub-one'
+                resourceGroup     = 'rg-one'
+                idLower           = '/subscriptions/sub-one/resourcegroups/rg-one/providers/microsoft.compute/virtualmachinescalesets/vmss-one'
+                name              = 'vmss-one'
+                location          = 'uksouth'
+                vmSize            = 'Standard_D2s_v5'
+                capacity          = '1'
+                skuTier           = 'Standard'
+                orchestrationMode = 'Uniform'
+                upgradeMode       = 'Manual'
+                provisioningState = 'Succeeded'
+                osType            = 'Linux'
+                SkipToken         = $null
+            }
+        }
+
+        $actual = @(Get-ResourceGraphVmssInventory -Subscriptions @('sub-one'))
+
+        $actual.Count | Should -Be 1
+        $actual[0].VmssName | Should -Be 'vmss-one'
+        Assert-MockCalled Search-AzGraph -Times 1 -Exactly
+    }
+
+    It 'handles one Retail record from one requested region' {
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                Items = @(
+                    [pscustomobject]@{
+                        armSkuName        = 'Standard_D2s_v5'
+                        armRegionName     = 'uksouth'
+                        currencyCode      = 'USD'
+                        unitPrice         = 0.10
+                        unitOfMeasure     = '1 Hour'
+                        meterName         = 'D2s v5'
+                        productName       = 'Virtual Machines Dsv5 Series'
+                        skuName           = 'D2s v5'
+                        effectiveStartDate = '2026-01-01'
+                    }
+                )
+                NextPageLink = $null
+            }
+        }
+
+        $actual = Get-RetailPricesForVirtualMachines -RegionsFilter @('uksouth') -MaxRetries 0
+
+        $actual.Count | Should -Be 1
+        $actual['Standard_D2s_v5|uksouth'].UnitPrice | Should -Be 0.10
+        Assert-MockCalled Invoke-RestMethod -Times 1 -Exactly
     }
 }
 
@@ -2334,7 +2498,7 @@ Describe 'Known-good control behavior' {
             CommitmentRetirementImpact = $false
         }
         $facts = [pscustomobject]@{
-            ReportVersion               = '0.9'
+            ReportVersion               = '0.10'
             RetailDeltaMonthly          = 0
             CostCovered                 = 1
             CostMissing                 = 0
@@ -2364,7 +2528,7 @@ Describe 'Known-good control behavior' {
         $w3Card | Should -Match 'generation boundary'
         $w3Card | Should -Not -Match 'Cross-family'
         $w3Card | Should -Not -Match 'class change'
-        $html | Should -Match '<span>Script version</span><strong>v0\.9</strong>'
+        $html | Should -Match '<span>Script version</span><strong>v0\.10</strong>'
         $html | Should -Match 'Retail delta coverage: 1 of 1 retirement-path VM\(s\)'
         $html | Should -Match 'Compare net values across runs only when this coverage denominator is unchanged'
         $html | Should -Match '<strong>Candidate-fit disclaimer:</strong> Recommended SKUs are nearest-fit candidates'

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.10 - 2026-07-15
+
+- Fixed Resource SKUs REST retrieval for a single analyzed region. PowerShell no longer unwraps the one-item
+  query-target collection and throws on `.Count` under strict mode before making the REST request.
+- Kept VM, Batch pool and VMSS Resource Graph results array-shaped at the main workflow call sites. Added
+  one-result regressions for those inventories and Retail pricing, complementing the existing Compute SKU,
+  Advisor, commitment and Release Communications query coverage.
+
 ## v0.9 - 2026-07-15
 
 - Replaced hard parity gates for local temporary storage, maximum NICs and maximum data disks with explicit
