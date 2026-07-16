@@ -1,6 +1,6 @@
 # Azure SKU Modernization Report
 
-**Current version:** `v0.10`
+**Current version:** `v0.11`
 
 > **See the output first:** open the rendered anonymized dashboard:
 > [Rendered HTML demo](https://ripom.github.io/Azure-SKU-Modernization-Report/examples/Azure-SKU-Modernization-Report-example.html)
@@ -117,8 +117,8 @@ Release history is maintained in [CHANGELOG.md](CHANGELOG.md).
 ## Review tests
 
 The repository includes a focused Pester review suite for retirement-source parsing, SKU resolution,
-recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.10`
-baseline contains 171 tests and is validated with Pester 5.7.1.
+recommendation safety, cost publication guards, backlog selection and external API contracts. The `v0.11`
+baseline contains 178 tests and is validated with Pester 5.7.1.
 
 Run it with Pester 5:
 
@@ -636,10 +636,15 @@ default and effect.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-SubscriptionIds` | `string[]` | (all enabled subscriptions of the tenant) | Subscriptions to analyze. If omitted, uses all `Enabled` subscriptions of the effective tenant. |
-| `-TenantId` | `string` | (tenant of the current Az context) | Target tenant. If the current context is on a different tenant, forces a new sign-in. |
+| `-TenantId` | `string` | (tenant of the current Az context) | Target tenant. If the current context is on a different tenant, reuses a saved Az context for the requested tenant when available; otherwise starts a new sign-in. |
 | `-UseDeviceAuthentication` | `switch` | off | Uses the device code flow for `Connect-AzAccount` (useful without an interactive browser). |
 | `-Regions` | `string[]` | (detected from the VM inventory) | Restricts the analysis to the specified regions. If omitted, automatically detects the regions from the VMs found. |
 | `-OutputRoot` | `string` | `.\out` | Root folder for outputs; each run creates `out/<timestamp>/`. |
+
+> **Azure Lighthouse:** delegated-subscription scenarios have not been tested for v0.11 and are not
+> guaranteed. Subscription discovery requires the returned `TenantId` to match the effective tenant, so a
+> Lighthouse subscription belonging to a customer tenant may be excluded even when it is visible to the
+> managing identity.
 
 ### Recommendation engine (scoring & candidates)
 

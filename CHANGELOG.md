@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.11 - 2026-07-16
+
+- Fixed single-subscription scope handling. A lone `-SubscriptionIds` result now remains array-shaped, so
+  initial context selection uses the complete subscription GUID instead of indexing its first character.
+- Added defensive tenant isolation to subscription discovery. Enabled subscriptions returned by Az.Accounts
+  are accepted only when their `TenantId` matches the effective tenant.
+- Reused existing Az PowerShell authentication without unnecessary login prompts. The script now evaluates
+  saved contexts for the effective tenant, skips stale or unusable entries, and selects the first context that
+  can retrieve enabled subscriptions.
+- Validated the currently active context as well as inactive saved contexts. If no saved context is operational,
+  the script falls back to `Connect-AzAccount` instead of continuing with an unusable token and reporting an
+  empty subscription scope.
+- Azure Lighthouse delegated-subscription scenarios have not been tested in v0.11 and are not guaranteed;
+  tenant isolation may exclude subscriptions whose owning tenant differs from the effective tenant.
+- Updated authentication and scope regressions; the Pester 5.7.1 baseline now contains 178 passing tests.
+
 ## v0.10 - 2026-07-15
 
 - Fixed Resource SKUs REST retrieval for a single analyzed region. PowerShell no longer unwraps the one-item

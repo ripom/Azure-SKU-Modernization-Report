@@ -24,7 +24,7 @@ BeforeAll {
     $script:RiskCriticalDays = 365
     $script:RiskHighDays = 730
     $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
-    $script:ReportVersion = '0.10'
+    $script:ReportVersion = '0.11'
     $script:EffectiveTenantId = 'test-tenant'
 
     function Write-Log {
@@ -1718,14 +1718,14 @@ Describe 'Risk, cost, and delivery artifacts' {
 }
 
 Describe 'External contract defaults' {
-    It 'publishes the v0.10 runtime report version' {
+    It 'publishes the v0.11 runtime report version' {
         $assignment = $script:SourceAst.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
             $node.Left.Extent.Text -eq '[string]$script:ReportVersion'
         }, $true) | Select-Object -First 1
 
-        $assignment.Right.Expression.Value | Should -Be '0.10'
+        $assignment.Right.Expression.Value | Should -Be '0.11'
     }
 
     It 'uses the Resource SKUs operation API version documented for that endpoint' {
@@ -2498,7 +2498,7 @@ Describe 'Known-good control behavior' {
             CommitmentRetirementImpact = $false
         }
         $facts = [pscustomobject]@{
-            ReportVersion               = '0.10'
+            ReportVersion               = '0.11'
             RetailDeltaMonthly          = 0
             CostCovered                 = 1
             CostMissing                 = 0
@@ -2528,7 +2528,7 @@ Describe 'Known-good control behavior' {
         $w3Card | Should -Match 'generation boundary'
         $w3Card | Should -Not -Match 'Cross-family'
         $w3Card | Should -Not -Match 'class change'
-        $html | Should -Match '<span>Script version</span><strong>v0\.10</strong>'
+        $html | Should -Match '<span>Script version</span><strong>v0\.11</strong>'
         $html | Should -Match 'Retail delta coverage: 1 of 1 retirement-path VM\(s\)'
         $html | Should -Match 'Compare net values across runs only when this coverage denominator is unchanged'
         $html | Should -Match '<strong>Candidate-fit disclaimer:</strong> Recommended SKUs are nearest-fit candidates'
@@ -2821,5 +2821,112 @@ Describe 'Known-good control behavior' {
         $summary | Should -Match 'Unclassified \(no catalog target\)'
         $facts.RecommendationWithheldCount | Should -Be 1
         ($facts.SkuChangeWithoutGenChange + $facts.SkuChangeWithGenChange + $facts.RecommendationWithheldCount) | Should -Be $facts.RetireCount
+    }
+}
+
+Describe 'Subscription scope resolution' {
+    BeforeEach {
+        Mock Get-AzSubscription {
+            @(
+                [pscustomobject]@{ Id = '8684bbfa-99a3-481a-895d-ef2701bfb3c1'; State = 'Enabled'; TenantId = 'tenant-a' }
+                [pscustomobject]@{ Id = 'efe17439-162c-400d-8d8a-2ec2220dd13b'; State = 'Enabled'; TenantId = 'tenant-b' }
+            )
+        }
+    }
+
+    It 'keeps a single requested subscription ID intact' {
+        $actual = @(Resolve-TargetSubscriptionIds `
+            -Tenant 'tenant-a' `
+            -RequestedSubscriptionIds @('8684bbfa-99a3-481a-895d-ef2701bfb3c1'))
+
+        $actual | Should -HaveCount 1
+        $actual[0] | Should -Be '8684bbfa-99a3-481a-895d-ef2701bfb3c1'
+    }
+
+    It 'excludes subscriptions returned for a different tenant' {
+        $actual = @(Resolve-TargetSubscriptionIds -Tenant 'tenant-a')
+
+        $actual | Should -HaveCount 1
+        $actual[0] | Should -Be '8684bbfa-99a3-481a-895d-ef2701bfb3c1'
+    }
+
+    It 'captures the resolved IDs as an array before initial context indexing' {
+        $sourceText = [System.IO.File]::ReadAllText($script:SourcePath)
+
+        $sourceText | Should -Match '\$effectiveSubscriptionIds\s*=\s*@\(Resolve-TargetSubscriptionIds'
+    }
+
+    It 'validates the effective tenant even when it is already active' {
+        $sourceText = [System.IO.File]::ReadAllText($script:SourcePath)
+
+        $sourceText | Should -Match '\$tenantToValidate\s*=\s*if\s*\(\$TenantId\)'
+        $sourceText | Should -Match 'Select-AzTenantContext\s+-Tenant\s+\$tenantToValidate'
+        $sourceText | Should -Not -Match 'if\s*\(\$TenantId\s+-and\s*\(-not\s+\$ctx\s+-or'
+    }
+
+    It 'activates a saved context for the requested tenant' {
+        $script:activeContext = [pscustomobject]@{
+            Tenant = [pscustomobject]@{ Id = 'tenant-b' }
+        }
+        Mock Get-AzContext {
+            if ($ListAvailable) {
+                return @(
+                    [pscustomobject]@{ Name = 'context-a'; Tenant = [pscustomobject]@{ Id = 'tenant-a' } }
+                    [pscustomobject]@{ Name = 'context-b'; Tenant = [pscustomobject]@{ Id = 'tenant-b' } }
+                )
+            }
+            return $script:activeContext
+        }
+        Mock Set-AzContext {
+            $script:activeContext = $Context
+        }
+
+        $actual = Select-AzTenantContext -Tenant 'tenant-a'
+
+        $actual.Tenant.Id | Should -Be 'tenant-a'
+        Assert-MockCalled Set-AzContext -Times 1 -Exactly
+    }
+
+    It 'skips a stale saved context and uses the next operational context' {
+        $script:subscriptionProbeCount = 0
+        $script:activeContext = [pscustomobject]@{
+            Name = 'original'
+            Tenant = [pscustomobject]@{ Id = 'tenant-b' }
+        }
+        Mock Get-AzContext {
+            if ($ListAvailable) {
+                return @(
+                    [pscustomobject]@{ Name = 'stale'; Tenant = [pscustomobject]@{ Id = 'tenant-a' } }
+                    [pscustomobject]@{ Name = 'operational'; Tenant = [pscustomobject]@{ Id = 'tenant-a' } }
+                )
+            }
+            return $script:activeContext
+        }
+        Mock Set-AzContext {
+            $script:activeContext = $Context
+        }
+        Mock Get-AzSubscription {
+            $script:subscriptionProbeCount++
+            if ($script:subscriptionProbeCount -eq 1) {
+                return @()
+            }
+            return @([pscustomobject]@{ Id = 'sub-a'; State = 'Enabled'; TenantId = 'tenant-a' })
+        }
+
+        $actual = Select-AzTenantContext -Tenant 'tenant-a'
+
+        $actual.Tenant.Id | Should -Be 'tenant-a'
+        Assert-MockCalled Set-AzContext -Times 2 -Exactly
+        Assert-MockCalled Get-AzSubscription -Times 2 -Exactly
+    }
+
+    It 'returns no context when the requested tenant was not previously saved' {
+        Mock Get-AzContext { @() } -ParameterFilter { $ListAvailable }
+        Mock Set-AzContext {}
+
+        $actual = Select-AzTenantContext -Tenant 'tenant-missing'
+
+        $actual | Should -BeNullOrEmpty
+        Assert-MockCalled Set-AzContext -Times 0 -Exactly
     }
 }

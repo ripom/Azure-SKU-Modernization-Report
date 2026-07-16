@@ -149,7 +149,7 @@ $ErrorActionPreference = "Stop"
 [int]$script:RiskCriticalDays = 365
 [int]$script:RiskHighDays = 730
 $script:WaveOrder = [ordered]@{ W0 = 0; W1 = 1; W2 = 2; W3 = 3; W4 = 4 }
-[string]$script:ReportVersion = '0.10'
+[string]$script:ReportVersion = '0.11'
 $script:RetailLastPageCount = 0
 $script:RetailLastDownloadComplete = $true
 $script:CommitmentLastDownloadComplete = $true
@@ -1219,7 +1219,13 @@ function Resolve-TargetSubscriptionIds {
         }
     }
 
-    $enabledSubs = @($allSubs | Where-Object { [string]$_.State -eq "Enabled" })
+    $enabledSubs = @($allSubs | Where-Object {
+        [string]$_.State -eq "Enabled" -and
+        (-not $Tenant -or (
+            $_.PSObject.Properties.Match('TenantId').Count -gt 0 -and
+            [string]$_.TenantId -eq $Tenant
+        ))
+    })
     if (@($enabledSubs).Count -eq 0) {
         throw "No Enabled subscription found in the current tenant/scope."
     }
@@ -1238,6 +1244,38 @@ function Resolve-TargetSubscriptionIds {
     }
 
     return @($enabledSubs | Select-Object -ExpandProperty Id -Unique)
+}
+
+function Select-AzTenantContext {
+    param([Parameter(Mandatory = $true)][string]$Tenant)
+
+    $savedContexts = @(Get-AzContext -ListAvailable -ErrorAction SilentlyContinue | Where-Object {
+        $_.Tenant -and [string]$_.Tenant.Id -eq $Tenant
+    })
+
+    foreach ($savedContext in $savedContexts) {
+        try {
+            Set-AzContext -Context $savedContext -ErrorAction Stop | Out-Null
+            $selectedContext = Get-AzContext -ErrorAction SilentlyContinue
+            if (-not $selectedContext -or -not $selectedContext.Tenant -or [string]$selectedContext.Tenant.Id -ne $Tenant) {
+                continue
+            }
+
+            $enabledSubscriptions = @(Get-AzSubscription -TenantId $Tenant -ErrorAction Stop | Where-Object {
+                [string]$_.State -eq 'Enabled' -and
+                $_.PSObject.Properties.Match('TenantId').Count -gt 0 -and
+                [string]$_.TenantId -eq $Tenant
+            })
+            if ($enabledSubscriptions.Count -gt 0) {
+                return $selectedContext
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    return $null
 }
 
 function ConvertTo-NormalizedLocation {
@@ -8348,18 +8386,40 @@ try {
     }
 
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
-    $mustLogin = $false
-
-    if (-not $ctx) {
-        $mustLogin = $true
+    $tenantToValidate = if ($TenantId) {
+        $TenantId
+    }
+    elseif ($ctx -and $ctx.Tenant) {
+        [string]$ctx.Tenant.Id
+    }
+    else {
+        $null
     }
 
-    if ($ctx -and $TenantId -and $ctx.Tenant.Id -ne $TenantId) {
-        Write-Log "Current tenant ($($ctx.Tenant.Id)) differs from requested tenant ($TenantId). Performing new login." "WARN"
-        $mustLogin = $true
+    if ($tenantToValidate) {
+        try {
+            $savedTenantContext = Select-AzTenantContext -Tenant $tenantToValidate
+            if ($savedTenantContext) {
+                $ctx = $savedTenantContext
+                Write-Log "Using validated saved Azure context for tenant $tenantToValidate."
+            }
+            else {
+                $ctx = $null
+                Write-Log "No operational saved Azure context found for tenant $tenantToValidate; authentication is required." "WARN"
+            }
+        }
+        catch {
+            $ctx = $null
+            Write-Log "Saved Azure context for tenant $tenantToValidate could not be validated: $($_.Exception.Message)" "WARN"
+        }
     }
+
+    $mustLogin = (-not $ctx -or ($TenantId -and [string]$ctx.Tenant.Id -ne $TenantId))
 
     if ($mustLogin) {
+        if ($ctx -and $TenantId) {
+            Write-Log "Current tenant ($($ctx.Tenant.Id)) differs from requested tenant ($TenantId). Performing new login." "WARN"
+        }
         Write-Log "Starting Azure authentication"
         if ($TenantId) {
             if ($UseDeviceAuthentication) {
@@ -8427,7 +8487,7 @@ try {
     $script:EffectiveTenantId = $effectiveTenantId
 
     Write-Log "Effective tenant in use: $effectiveTenantId"
-    $effectiveSubscriptionIds = Resolve-TargetSubscriptionIds -Tenant $effectiveTenantId -RequestedSubscriptionIds $SubscriptionIds
+    $effectiveSubscriptionIds = @(Resolve-TargetSubscriptionIds -Tenant $effectiveTenantId -RequestedSubscriptionIds $SubscriptionIds)
     Write-Log "Subscriptions in scope: $(@($effectiveSubscriptionIds).Count)"
 
     if (@($effectiveSubscriptionIds).Count -gt 0) {
